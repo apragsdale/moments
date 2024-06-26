@@ -150,10 +150,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: install into venv
         run: |
-
           python -m venv venv
           source venv/bin/activate
-          python -m pip install --no-cache-dir --prefer-binary --pre --find-links . moments-popgen
+          python -m pip install --no-cache-dir --prefer-binary --pre --find-links . moments-popgen.*cp${{ matrix.py-short }}*.whl
           python -c "import moments;print(moments.__version__)"
           python -c "import moments;print(moments.__file__)"
 
