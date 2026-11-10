@@ -96,6 +96,21 @@ The null datasets are what test the LRT false positive rate (the main open quest
 100 gives a standard error of ~2.2 points at the 5% level. Option to get more from them:
 evaluate the false positive rate on the first 100, 250 and all 500 regions.
 
+## CHTC test run (2026-11-10)
+
+6 jobs (2 per scenario, 40 regions, 20 refits, 1 CPU): all returned their files to
+`data/` and `results/` (`preserve_relative_paths` works). CPU use ~0.98, memory ~1.1 GB,
+disk ~620 MB (mostly the container image). Times on CHTC are ~2.5x the laptop pilot:
+
+- simulate + parse: 189–243 s per region (mean 222), so ~31 h (up to 34 h) on one core
+  for 500 regions;
+- LD analysis: ~150 s without refits, ~20 s per refit (500 refits: ~2.8 h);
+- SFS analysis: ~260 s without refits, ~39 s per refit (500 refits: ~5.5 h).
+
+One core per job would be 31–39 h, so jobs now use `request_cpus = 4` (4 GB), passed to
+`--procs`: ~10 h per mig/weak job, ~8 h per null job. Total ~7,000 CPU-hours; with 200
+refits instead of 500, ~6,500.
+
 ## Finding from the pilot: SFS likelihood jumps at M = 0
 
 `Spectrum.integrate` uses `Integration_nomig.integrate_nomig` when all migration rates
