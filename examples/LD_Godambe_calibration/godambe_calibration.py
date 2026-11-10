@@ -131,6 +131,10 @@ R_BINS = np.concatenate(([0], np.logspace(-6, -3, 13)))
 # Integrating the 2D SFS at the full size (2 * NUM_SAMPLES = 80) is much slower.
 SFS_SAMPLE_SIZE = 40
 
+# SFS: the migration rate at which the model is evaluated in place of M = 0 (see
+# SFSAnalysis.model).
+M_FLOOR = 1e-12
+
 # Parameters (nu0, nu1, T, M, Ne) in genetic units, with M = 2 Ne m. In the LD model,
 # Ne is the last parameter. In the SFS model, Ne is computed from
 # theta = 4 Ne U L_total, where L_total is the total length of the regions.
@@ -435,11 +439,17 @@ class SFSAnalysis:
 
     @staticmethod
     def model(params, ns):
+        # Spectrum.integrate uses a different integrator when all migration rates are
+        # exactly zero, and the log-likelihood jumps between M = 0 and M > 0 (by about
+        # 0.025 in the pilot). This breaks finite differences that start at M = 0. So
+        # we evaluate M = 0 as M = M_FLOOR, which uses the same integrator as M > 0.
+        params = np.array(params, dtype=float)
+        params[MIG_IDX] = max(params[MIG_IDX], M_FLOOR)
         return moments.Demographics2D.split_mig(params, ns)
 
     @staticmethod
     def nomig_model(params, ns):
-        return moments.Demographics2D.split_mig([*params, 0], ns)
+        return SFSAnalysis.model([*params, 0], ns)
 
     def _with_Ne(self, p4, fs):
         theta = moments.Inference.optimal_sfs_scaling(self.model(p4, self.ns), fs)
@@ -485,8 +495,14 @@ class SFSAnalysis:
         }
 
     def lrt_adjust(self, p_nested):
+        # with the model as users would pass it, without M_FLOOR, so that the results
+        # include the effect of the jump at M = 0 on LRT_adjust
         return moments.Godambe.LRT_adjust(
-            self.model, self.bootstraps, p_nested[:4], self.fs, [MIG_IDX]
+            moments.Demographics2D.split_mig,
+            self.bootstraps,
+            p_nested[:4],
+            self.fs,
+            [MIG_IDX],
         )
 
     def data_and_bootstraps(self):
