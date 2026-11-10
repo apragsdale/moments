@@ -1,0 +1,28 @@
+# One job per dataset: each row of the queue file gives a scenario, a seed, the number
+# of regions, and the number of bootstrap refits.
+# Before submitting, from this directory: mkdir -p log data results
+universe = container
+container_image = osdf:///chtc/staging/a/apragsdale/moments_godambe.sif
+
+executable = run_replicate.sh
+arguments = $(scenario) $(seed) $(regions) $(boot_refits)
+
+transfer_input_files = godambe_calibration.py
+
+# The parsed dataset (to rerun analyses without simulating again) and the LD and SFS
+# results, returned to data/ and results/ here. summarize runs on these afterwards.
+transfer_output_files = data/$(scenario)_$(seed).pkl, results/ld_$(scenario)_$(seed).pkl, results/sfs_$(scenario)_$(seed).pkl
+preserve_relative_paths = true
+
+output = log/run_$(scenario)_$(seed).out
+error  = log/run_$(scenario)_$(seed).err
+log    = log/run_$(Cluster).log
+
+request_cpus   = 1
+request_memory = 5GB
+request_disk   = 2GB
+
+# Test run: 2 datasets per scenario, 40 regions, 20 refits (~1-2 hours per job).
+queue scenario, seed, regions, boot_refits from queue_test.csv
+# Full run: comment out the line above and use this one instead.
+# queue scenario, seed, regions, boot_refits from queue_inputs.csv
