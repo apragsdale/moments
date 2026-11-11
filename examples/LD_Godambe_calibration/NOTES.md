@@ -1,10 +1,10 @@
-# Godambe / LRT calibration experiment: notes (updated 2026-11-10)
+# Godambe / LRT calibration experiment: notes (updated 2026-11-11)
 
-Where we stopped: the experiment script is written and a one-dataset pilot ran end to
-end (2026-11-09). The full run will be on UW–Madison CHTC (HTCondor, Apptainer image
-with moments from devel), one job per dataset (scenario + seed). The HTCondor files are
-written (2026-11-10). Still open before running: the SFS M = 0 change (see "Next
-steps").
+Where we stopped: the first full run on UW–Madison CHTC (193 of 200 datasets) is
+summarized in "First full run: preliminary results". It is being redone from scratch
+with infinite-sites mutations and chained optimizers (see "Second run"); the write-up
+waits for that. The proposed fix for the LRT is described in "The LRT adjustment: method
+and intuition".
 
 ## Goal
 
@@ -20,8 +20,8 @@ Check, with msprime simulations run through the full workflow, that
 | Path | What it is |
 | --- | --- |
 | `godambe_calibration.py` | The experiment. `run --scenario S --seed N` simulates one dataset and analyzes it with LD and SFS; `simulate` / `analyze --method {ld,sfs}` do the stages separately; `summarize` pools all results. The docstring has usage. |
-| `submit_replicates.sub` | HTCondor submit file: one job per row of the queue file (set to `queue_test.csv`; switch the `queue` line for the full run), 1 CPU, returns `data/{S}_{N}.pkl` and `results/{ld,sfs}_{S}_{N}.pkl`. |
-| `run_replicate.sh` | Job script: sets one thread, runs `run --scenario $1 --seed $2 --regions $3 --boot-refits $4 --procs 1`. |
+| `submit_replicates.sub` | HTCondor submit file: one job per row of the queue file (switch the `queue` line between `queue_test.csv` and `queue_inputs.csv`), 4 CPUs, returns `data/{S}_{N}.pkl` and `results/{ld,sfs}_{S}_{N}.pkl`. |
+| `run_replicate.sh` | Job script: sets one thread, runs `run --scenario $1 --seed $2 --regions $3 --boot-refits $4 --procs $5` (`$5` = `request_cpus`). |
 | `queue_inputs.csv` | Full run, `scenario, seed, regions, boot_refits`: mig 1–50, weak 1–50, null 1–100, all with 500 regions and 500 refits. |
 | `queue_test.csv` | Cluster test: seeds 9001–9002 for each scenario, 40 regions, 20 refits (~1–2 h per job). Seeds differ from the full run, so outputs don't collide; delete them before `summarize`. |
 | `NOTES.md` | This file. |
@@ -107,9 +107,14 @@ disk ~620 MB (mostly the container image). Times on CHTC are ~2.5x the laptop pi
 - LD analysis: ~150 s without refits, ~20 s per refit (500 refits: ~2.8 h);
 - SFS analysis: ~260 s without refits, ~39 s per refit (500 refits: ~5.5 h).
 
-One core per job would be 31–39 h, so jobs now use `request_cpus = 4` (4 GB), passed to
+One core per job would be 31–39 h, so jobs now use `request_cpus = 4`, passed to
 `--procs`: ~10 h per mig/weak job, ~8 h per null job. Total ~7,000 CPU-hours; with 200
 refits instead of 500, ~6,500.
+
+Memory: 4 GB was too little for 4 processes. Full-run jobs went over the cgroup limit,
+because each worker process simulating and parsing a region needs about as much memory
+as the whole 1-CPU test job (~1 GB), so the peak grows with the number of processes.
+Request more than 1 GB per process plus the parent.
 
 ## Finding from the pilot: SFS likelihood jumps at M = 0
 
@@ -131,28 +136,214 @@ SFS (n = 40 per deme) at the nested fit:
   or adding to the LRT issue.
 - The LD likelihood has no such jump (H_MM stable from step 1e-4 to 1e-2).
 
+## The LRT adjustment: method and intuition
+
+This is the proposed fix for `moments.Godambe.LRT_adjust` and
+`moments.LD.Godambe.LRT_adjust`. In the script it is `adjustment_inverse_blocks` with
+`centre=True`.
+
+### Notation
+
+- θ = (ψ, τ): ψ are the q parameters fixed by the nested model (here ψ = M, q = 1, fixed
+  at 0), and τ are the other parameters (nu0, nu1, T, Ne), which are refit in both
+  models.
+- cℓ(θ): the composite log-likelihood. The LD and SFS likelihoods both treat linked
+  data as independent (LD: all bins and regions; SFS: all sites).
+- U = ∇cℓ: the score.
+- H = −∇²cℓ: the sensitivity matrix, the curvature of the likelihood.
+- J = Var(U): the variability matrix, the variance of the score across datasets.
+  Estimated from the scores of the bootstrap datasets, evaluated at the parameters of
+  the nested fit.
+- D = 2 [cℓ(θ̂) − cℓ(0, τ̂₀)]: the likelihood ratio statistic. θ̂ is the full fit and τ̂₀
+  is the nested fit.
+
+All of H, J and the mean score cU are computed **over all parameters**, at the nested
+fit.
+
+### Formula
+
+    adj = q / tr[ (H^ψψ)⁻¹ G^ψψ ],    with  H^ψψ = (H⁻¹)_ψψ,  G^ψψ = (H⁻¹ J H⁻¹)_ψψ,
+                                       and  J = mean(U Uᵀ) − cU cUᵀ  (centred)
+
+Compare adj · D with the null distribution: ½χ²₀ + ½χ²₁ here, since M = 0 is on the
+boundary (Self & Liang 1987); χ²_q in general. With q = 1 this is just
+adj = H^MM / G^MM.
+
+Reference: Varin, Reid & Firth (2011) §2.3. D tends to Σ λⱼ Zⱼ², where the λⱼ are the
+eigenvalues of (H^ψψ)⁻¹ G^ψψ. Dividing by the mean eigenvalue is first-order moment
+matching (Rotnitzky & Jewell 1990; Geys et al. 1999). For q = 1 it is exact
+asymptotically.
+
+### Intuition
+
+1. **Why an adjustment is needed.** For a true likelihood, H = J (the information
+   identity), and D ~ χ²_q (Wilks). A composite likelihood of linked data counts each
+   correlated piece of data as independent evidence. The likelihood surface is then too
+   sharply peaked for how much the estimates actually vary between datasets: J is
+   "larger" than H. D inherits that overconfidence and is inflated by a factor λ. The
+   adjustment divides it back out.
+
+2. **What λ is.** For q = 1, D ≈ (ψ̂ − ψ₀)² / H^ψψ. The numerator varies across datasets
+   with the true variance of the estimate, G^ψψ: the GIM (sandwich) variance. The
+   denominator is the variance the likelihood's curvature claims, H^ψψ: the FIM-type
+   variance. So
+
+       λ = G^ψψ / H^ψψ = (SD_GIM(M) / SD_FIM(M))²,    adj = 1 / λ.
+
+   (H and J here are at the same parameters, the nested fit; the CIs in the results
+   use the full fit, so the match there is only approximate.)
+   **The LRT adjustment is the same correction as using GIM instead of FIM for the
+   uncertainty of M, applied to the test.** Median adj under the null is ~0.21 for LD
+   and ~0.11 for the SFS, so the unadjusted D is 5–10 times too large. The FIM interval
+   undercoverage in the results is the same effect.
+
+3. **Why inverse blocks rather than submatrices.** The current `LRT_adjust` uses
+   q / tr(J_ψψ H_ψψ⁻¹), the ψψ submatrices of H and J. That measures how inflated the
+   score for M is **with the other parameters held fixed**. But D is a profile
+   statistic: when M moves, T and the sizes are refit and absorb part of the signal (T
+   and M have correlation −0.89 in H). The relevant score is the part of the M score
+   the other parameters can't absorb, the efficient score
+   U* = U_ψ − H_ψτ H_ττ⁻¹ U_τ. Its curvature is the Schur complement
+   (H^ψψ)⁻¹ = H_ψψ − H_ψτ H_ττ⁻¹ H_τψ. Then λ = Var(U*) / (H^ψψ)⁻¹, which is exactly the
+   inverse-block formula. (The ψ rows of H⁻¹ are H^ψψ [I, −H_ψτ H_ττ⁻¹], so
+   G^ψψ = H^ψψ Var(U*) H^ψψ.) The submatrix version is right only when H_ψτ = 0, that
+   is, when M is uncorrelated with the other parameters.
+
+4. **Why J must be centred.** J should be the variance of the score: its noise. At the
+   nested fit the model is not stationary in M, and the M score has a nonzero mean.
+   That mean is the evidence for migration that the test is trying to detect. The
+   uncentred mean(U Uᵀ) = Var(U) + cU cUᵀ counts that signal as noise. adj shrinks as the
+   evidence grows, so the test loses power and is conservative even under the null,
+   because at the boundary about half the null datasets have a positive M slope. It is
+   also why `score_stat` with an uncentred J is always below 1 (Sherman–Morrison:
+   s / (1 + s)).
+
+5. **Neither change works alone.** In both the semi-parametric study and this run,
+   centring J with submatrices, or inverse blocks with an uncentred J, stays
+   conservative. Both are needed.
+
+### Numerical details that matter
+
+- Finite differences at M = 0: use second-order forward differences in M, never stepping
+  to negative M. They match central differences to ~1e-6 for LD.
+- SFS: evaluate "M = 0" at M = 1e-12 (`M_FLOOR`), so every evaluation uses the same
+  integrator. See "SFS likelihood jumps at M = 0" above.
+- Start the full fit from the nested optimum (plus a few M starts), or D comes out too
+  small.
+
+### Known weakness: H can be indefinite at the nested fit
+
+In LD `mig` (M = 2), the inverse-block adj came out **negative in 30 of 46 datasets**.
+The full-parameter H at the nested fit has one negative eigenvalue. Its eigenvector
+trades nu1 against M (about (0, 0.70, 0, −0.71, 0)). When the nested model is badly
+wrong, its fit can sit at a saddle of the full likelihood, and H⁻¹ then has the wrong
+sign. The submatrix formula only needs H_MM > 0, so it doesn't see this.
+
+- It happened only under strong alternatives, where D ≈ 3,000. It never happened under
+  the null or with weak migration (0 of 147 datasets).
+- A negative adj · D gives p = 1, so power in LD `mig` at α = 0.05 is 0.30 instead of
+  1.00.
+- Possible guards (not tested):
+  - check that H is positive definite and warn or raise if not;
+  - use H (and J) at the full fit, which is asymptotically equivalent under the null
+    and local alternatives;
+  - treat adj ≤ 0 as "reject" when D is large.
+
+## First full run: preliminary results (2026-11-11)
+
+Copied from CHTC to `results/` (test seeds 9001–9002 excluded). There are 46 `mig`,
+47 `weak` and 100 `null` datasets for each method; 7 jobs were still running. Shown by
+`python godambe_calibration.py summarize`. Rerun everything once the last jobs are in.
+
+**LRT under the null.** Fraction of p-values below α = .01 / .05 / .10 / .25 (±~0.02
+at 0.05):
+
+| Adjustment | LD | SFS |
+| --- | --- | --- |
+| None | .14 / .21 / .23 / .38 | .25 / .32 / .36 / .40 |
+| `LRT_adjust` (library) | .00 / .00 / .03 / .17 | .00 / .01 / .05 / .15 |
+| Submatrix, centred J | .00 / .00 / .04 / .17 | .01 / .03 / .06 / .15 |
+| Inverse blocks, centred J | .00 / .04 / .09 / .22 | .01 / .06 / .07 / .27 |
+
+About 57% of null datasets have D = 0.
+
+**Power:**
+
+- Weak migration (M = 0.2), α = 0.01:
+  - LD: inverse blocks 0.96, `LRT_adjust` 0.51.
+  - SFS: `LRT_adjust` 0.00, inverse blocks 1.00.
+- Strong migration (M = 2), SFS: `LRT_adjust` shrinks D ≈ 25,000 to adj · D ≈ 5, so
+  p ≈ 0.011. It rejects at 0.05 but never at 0.01.
+- Strong migration (M = 2), LD: inverse blocks only 0.30, because of the negative
+  adjustments described above.
+
+**95% CI coverage** (n ≈ 46; ±~0.03):
+
+- FIM undercovers: 0.70–0.85 LD `mig`, 0.40–0.72 LD `weak`, 0.38–0.66 SFS.
+- GIM covers 0.85–1.00 and is slightly conservative: its mean SD is up to ~35% above
+  the spread of the estimates (SFS T: 0.0156 against 0.0115 of the truth).
+- GIM (log) is similar; for the SFS it is 0.98–1.00.
+
+**Issues to look into (hypotheses, not checked):**
+
+- **SFS fits are slightly biased:** −0.2% to −0.5% relative. That is about 1 SD for Ne
+  and nu0, which lowers SFS coverage for those (GIM: Ne 0.85 `mig`, 0.91 `weak`). Guess:
+  msprime's finite-sites mutations against moments' infinite-sites model; recurrent
+  hits would lower diversity and pull Ne down. Check: count multi-hit sites in a
+  simulated region.
+- **LD `weak` bootstrap is too narrow:** the bootstrap SD of M is 0.155 of the truth,
+  against an empirical SD of 0.27 and a GIM SD of 0.24. The other parameters are ~18%
+  too narrow. Bootstrap-SE coverage of M is 0.62. LD `mig` and SFS bootstraps are fine.
+  Guess: the L-BFGS-B refits start from `p_full` and stop early where the surface is
+  flat near small M. Check: refit some bootstrap sets from perturbed starts.
+- **Negative inverse-block adjustment under strong migration** (above).
+
+## Second run (prepared 2026-11-11)
+
+The first run's results above are superseded: all datasets are being rerun from
+scratch with these changes.
+
+- **Infinite sites.** `sim_mutations(..., discrete_genome=False)`, as in the moments
+  models, so there are no recurrent mutations. This may explain the SFS bias in the
+  first run. VCFs are written with `position_transform="legacy"`, because ~9 sites per
+  2 Mb region would otherwise share a rounded position.
+- **Chained optimizers.** Every fit (nested, each start of the full fit, and each
+  bootstrap refit) runs `FIT_CHAIN = ["lbfgsb", "fmin", "powell"]` on the log scale, each
+  starting from the previous result. The first run used a single L-BFGS-B for the full
+  fits and refits, and two rounds of fmin for the nested fit. The log-likelihood after
+  each optimizer is saved (`fit_traces`, `boot_traces`) and printed in the job log.
+- **200 bootstrap refits** instead of 500 (`queue_inputs.csv`). All 500 bootstrap sets
+  are still used for the Godambe methods.
+- **`request_memory = 8GB`** for 4 CPUs.
+
+Smoke test (laptop, one `weak` dataset, 16 regions, 8 refits, 8 processes):
+
+- **L-BFGS-B alone stops well short, especially for LD.** The fmin step after it
+  improved the LD full fits by 16–336 log-likelihood units, and the LD refits by a
+  median of 7 (max 72). For the SFS: the full fits by 0.05–26, the refits by about 0.1.
+  The nested fits gained 18 (LD) and 0.1 (SFS). Powell after fmin changed nothing
+  (< 1e-5). The first run's LD fits were probably under-converged too, but its data had
+  500 regions, so the size of the effect there is unknown.
+- **Time:** simulation was as before (206 s wall for 16 regions). Analysis took about
+  twice as long as the single-optimizer pilot: LD 97 s, SFS 139 s, against 53 s and 77 s.
+  Estimate on CHTC: ~40 s per LD refit and ~75 s per SFS refit, so 200 refits is
+  ~6.5 CPU-h per mig/weak dataset, a bit less than the first run's 500 single-optimizer
+  refits (~8.3 CPU-h).
+
+Before submitting on CHTC: move the first run's `data/`, `results/` and `log/` aside,
+for example to `run1_data/` etc. `simulate` and `analyze` skip outputs that already
+exist, so old files would otherwise be kept and nothing would be rerun.
+
 ## Next steps
 
-1. **Script changes (proposed, not made):**
-   - SFS: evaluate the no-migration model at M = 1e-12 instead of exactly 0 (in the
-     nested fit and as the base point for the finite differences), so all SFS
-     evaluations use the same integrator. Keep calling `LRT_adjust` at M = 0 as users
-     do, so its results show the effect of the jump.
-   - DONE 2026-11-10: seed per job. Each dataset is (scenario, seed); all random
-     streams come from `SeedSequence([scenario index, seed, ...])` (regions:
-     `[.., 0, region]`, bootstrap resampling: `[.., 1]`), so jobs are reproducible and
-     never share seeds. Seeds are explicit in `queue_inputs.csv` rather than
-     `$(Process)`, so resubmitting or adding datasets can't renumber them.
-2. Decide whether to keep the SFS projection at 40 haploids per deme.
-3. Cluster environment: the user is building an Apptainer image with moments from
-   devel (needs the log=True step fix, commit 7bc7488 on `godambe_log_step`, merged
-   first), msprime, scikit-allel, h5py, pandas, demes.
-4. On CHTC: `mkdir -p log data results`, submit the test (`queue_test.csv`, 6 jobs)
-   and check that all three files come back per job, plus run time and memory in the
-   condor log. Then delete the test outputs, switch the `queue` line to
-   `queue_inputs.csv`, and submit all 200. Jobs are ~15 h (mig/weak) and ~12.5 h (null) on one core;
-   check that this fits CHTC's default job length, or split simulate and analyze into
-   two jobs. Then `python godambe_calibration.py summarize` on the returned files.
+1. Pull the branch on CHTC, move the first run's outputs aside, and submit the second
+   run (`queue_inputs.csv`). Then copy `results/` and run `summarize`.
+2. Optionally check the two hypotheses above (SFS bias; LD bootstrap refits).
+3. Library fix: inverse blocks with centred J in both `LRT_adjust` functions, with a
+   guard for an indefinite H, and M = 0 handled without crossing the SFS integrator
+   jump. Open the issues first (texts drafted).
+4. Done 2026-11-10: seed per job; the SFS `M_FLOOR`; the CHTC test run. The SFS
+   projection stayed at 40 haploids per deme.
 
 ## Related open items
 
