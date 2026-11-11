@@ -12,8 +12,9 @@ model with known parameters, we run the full workflows: simulate regions with ms
   moments.Demographics2D.split_mig to their sum (with theta fit by multinomial scaling).
 
 Both analyses use the same simulated data and the same bootstrap replicates (the same
-regions resampled with replacement). Every fit runs L-BFGS-B, Nelder-Mead and Powell in
-turn (FIT_CHAIN), each from the previous result. We then check:
+regions resampled with replacement). Every fit runs L-BFGS-B, then Nelder-Mead, then
+Nelder-Mead again from slightly perturbed parameters, except in bootstrap refits
+(FIT_CHAIN, REFIT_CHAIN). We then check:
 
 1. Confidence intervals. For datasets with migration, we compute 95% CIs for every
    parameter (nu0, nu1, T, M = 2 Ne m, and Ne) using
@@ -136,10 +137,15 @@ SFS_SAMPLE_SIZE = 40
 # SFSAnalysis.model).
 M_FLOOR = 1e-12
 
-# Optimizers for every fit (nested, full, and bootstrap refits), run in turn on the log
-# scale, each starting from the previous one's result: L-BFGS-B, then Nelder-Mead
-# (fmin), then Powell. A single scipy optimizer often stops before the optimum.
-FIT_CHAIN = ["lbfgsb", "fmin", "powell"]
+# The steps of every fit (nested, full, and bootstrap refits): (optimizer, fold), run in
+# turn on the log scale, each from the best parameters so far. A single scipy optimizer
+# often stops before the optimum. With fold > 0, the parameters are first perturbed by a
+# random factor 2 ** (fold * uniform(-1, 1)), as moments.Misc.perturb_params does (fold
+# 0.1: up to about 7%), and the result is kept only if it improves the fit.
+FIT_CHAIN = [("lbfgsb", 0), ("fmin", 0), ("fmin", 0.1)]
+# The bootstrap refits, which are most of the analysis time, skip the perturbed step: in
+# the smoke tests it never improved a fit, and it doubled to tripled the SFS refit time.
+REFIT_CHAIN = FIT_CHAIN[:2]
 
 # Parameters (nu0, nu1, T, M, Ne) in genetic units, with M = 2 Ne m. In the LD model,
 # Ne is the last parameter. In the SFS model, Ne is computed from
@@ -348,6 +354,7 @@ class LDAnalysis:
         )
         self.stats = stats
         self.cache = {}
+        self.scenario, self.seed = data["scenario"], data["seed"]
 
     @staticmethod
     def model(params, rho=None, theta=0.001):
@@ -357,11 +364,11 @@ class LDAnalysis:
     def nomig_model(params, rho=None, theta=0.001):
         return moments.LD.Demographics2D.split_mig([*params, 0], rho=rho, theta=theta)
 
-    def fit(self, p_start, nested=False, data=None):
+    def fit(self, p_start, nested=False, data=None, key=0, chain=FIT_CHAIN):
         """
-        Fits the model with the optimizers in FIT_CHAIN in turn, each starting from the
-        previous one's result. Returns the parameters, the log-likelihood, and the
-        log-likelihood after each optimizer.
+        Fits the model with the steps in chain (see run_fit_chain). key identifies
+        the fit, for the random perturbations. Returns the parameters, the
+        log-likelihood, and the log-likelihood after each step.
         """
         means = self.means if data is None else data
         data = [means, self.varcovs]
@@ -371,19 +378,19 @@ class LDAnalysis:
             lower, upper = np.delete(LOWER, MIG_IDX), np.delete(UPPER, MIG_IDX)
         else:
             p, model, lower, upper = p_start, self.model, LOWER, UPPER
-        lls = []
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            for name in FIT_CHAIN:
-                optimizer = getattr(moments.LD.Inference, f"optimize_log_{name}")
-                p, neg_ll = optimizer(
-                    p, data, [model], rs=R_BINS, lower_bound=lower, upper_bound=upper
-                )
-                lls.append(-neg_ll)
-        p = np.array(p)
+
+        def optimize(name, p):
+            optimizer = getattr(moments.LD.Inference, f"optimize_log_{name}")
+            p, neg_ll = optimizer(
+                p, data, [model], rs=R_BINS, lower_bound=lower, upper_bound=upper
+            )
+            return p, -neg_ll
+
+        rng = _fit_rng(self, key)
+        p, ll, lls = run_fit_chain(optimize, p, lower, upper, rng, chain)
         if nested:
             p = np.insert(p, MIG_IDX, 0)
-        return p, lls[-1], lls
+        return p, ll, lls
 
     def loglik(self, p, x):
         """Composite log-likelihood at p of data x (normalizing statistics removed)."""
@@ -457,6 +464,7 @@ class SFSAnalysis:
             for b in data["sfs_bootstraps"]
         ]
         self.cache = {}
+        self.scenario, self.seed = data["scenario"], data["seed"]
 
     @staticmethod
     def model(params, ns):
@@ -476,11 +484,11 @@ class SFSAnalysis:
         theta = moments.Inference.optimal_sfs_scaling(self.model(p4, self.ns), fs)
         return np.append(p4, theta / (4 * U * self.L_total))
 
-    def fit(self, p_start, nested=False, data=None):
+    def fit(self, p_start, nested=False, data=None, key=0, chain=FIT_CHAIN):
         """
-        Fits the model with the optimizers in FIT_CHAIN in turn, each starting from the
-        previous one's result. Returns the parameters, the log-likelihood, and the
-        log-likelihood after each optimizer.
+        Fits the model with the steps in chain (see run_fit_chain). key identifies
+        the fit, for the random perturbations. Returns the parameters, the
+        log-likelihood, and the log-likelihood after each step.
         """
         fs = self.fs if data is None else data
         p = np.array(p_start[:4], dtype=float)
@@ -491,17 +499,17 @@ class SFSAnalysis:
             lower, upper = np.delete(lower, MIG_IDX), np.delete(upper, MIG_IDX)
         else:
             model = self.model
-        lls = []
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            for name in FIT_CHAIN:
-                optimizer = getattr(moments.Inference, f"optimize_log_{name}")
-                p = optimizer(p, fs, model, lower_bound=lower, upper_bound=upper)
-                lls.append(moments.Inference.ll_multinom(model(p, self.ns), fs))
-        p = np.array(p)
+
+        def optimize(name, p):
+            optimizer = getattr(moments.Inference, f"optimize_log_{name}")
+            p = optimizer(p, fs, model, lower_bound=lower, upper_bound=upper)
+            return p, moments.Inference.ll_multinom(model(p, self.ns), fs)
+
+        rng = _fit_rng(self, key)
+        p, ll, lls = run_fit_chain(optimize, p, lower, upper, rng, chain)
         if nested:
             p = np.insert(p, MIG_IDX, 0)
-        return self._with_Ne(p, fs), lls[-1], lls
+        return self._with_Ne(p, fs), ll, lls
 
     def loglik(self, p, x):
         """Poisson log-likelihood at p = (nu0, nu1, T, M, Ne) of the spectrum x."""
@@ -546,23 +554,54 @@ class SFSAnalysis:
 ANALYSES = {"ld": LDAnalysis, "sfs": SFSAnalysis}
 
 
+def _fit_rng(analysis, key):
+    # random stream for the perturbations in one fit: one per dataset, method and fit
+    method_idx = list(ANALYSES).index(analysis.name)
+    ss = _seed_sequence(analysis.scenario, analysis.seed, 2, method_idx, key)
+    return np.random.default_rng(ss)
+
+
+def run_fit_chain(optimize, p, lower, upper, rng, chain):
+    """
+    Runs the steps in chain (FIT_CHAIN or REFIT_CHAIN). optimize(name, p) runs one
+    optimizer from p and returns the parameters and log-likelihood. Each step starts
+    from the best parameters so far, perturbed first if the step's fold is > 0, and its
+    result is kept only if it improves the log-likelihood. Returns the best parameters,
+    their log-likelihood, and the log-likelihood that each step reached.
+    """
+    best_p, best_ll = np.array(p, dtype=float), -np.inf
+    lls = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for name, fold in chain:
+            p = best_p
+            if fold > 0:
+                p = p * 2 ** (fold * rng.uniform(-1, 1, size=len(p)))
+                p = np.clip(p, lower, upper)
+            p, ll = optimize(name, p)
+            lls.append(ll)
+            if ll > best_ll:
+                best_p, best_ll = np.array(p), ll
+    return best_p, best_ll, lls
+
+
 def fit_both(analysis, p_true):
     """
     Fits the nested model without migration, then the full model from the nested fit
     with a few values of the migration rate, and from the true parameters, keeping the
     best fit, so that its log-likelihood is at least that of the nested model.
-    Also returns the log-likelihood after each optimizer in FIT_CHAIN, for the nested
+    Also returns the log-likelihood after each step in FIT_CHAIN, for the nested
     fit and for each start of the full fit.
     """
-    p_nested, ll_nested, trace_nested = analysis.fit(p_true, nested=True)
+    p_nested, ll_nested, trace_nested = analysis.fit(p_true, nested=True, key=0)
     starts = [
         np.where(np.arange(5) == MIG_IDX, m0, p_nested) for m0 in [0.01, 0.1, 0.5]
     ]
     starts.append(np.maximum(p_true, [0, 0, 0, 0.01, 0]))
     best = (None, -np.inf)
     traces_full = []
-    for p_start in starts:
-        p, ll, trace = analysis.fit(p_start)
+    for k, p_start in enumerate(starts):
+        p, ll, trace = analysis.fit(p_start, key=1 + k)
         traces_full.append(trace)
         if ll > best[1]:
             best = (p, ll)
@@ -661,7 +700,8 @@ def adjustment_submatrix(H, J, cU, nested, centre=False):
 def _refit(args):
     method, path, b, p_full = args
     analysis = _load_analysis(method, path)
-    return analysis.fit(p_full, data=analysis.bootstrap_data(b))
+    data = analysis.bootstrap_data(b)
+    return analysis.fit(p_full, data=data, key=1000 + b, chain=REFIT_CHAIN)
 
 
 _analysis_cache = {}
@@ -693,6 +733,7 @@ def analyze_dataset(method, path, procs, boot_refits):
     p_nested, ll_nested, p_full, ll_full, traces = fit_both(analysis, p_true)
     res.update(p_nested=p_nested, ll_nested=ll_nested, p_full=p_full, ll_full=ll_full)
     res["fit_chain"] = FIT_CHAIN
+    res["refit_chain"] = REFIT_CHAIN
     res["fit_traces"] = traces
     res["D"] = max(2 * (ll_full - ll_nested), 0)
 
@@ -747,15 +788,19 @@ def print_dataset_summary(res):
     for name, a in adj.items():
         p = moments.Godambe.sum_chi2_ppf(a * res["D"], weights=(0.5, 0.5))
         print(f"  adj ({name}) = {a:.4g}, p = {p:.4g}")
-    # how much each optimizer after the first improved the fits
-    print(f"  ll after each of {res['fit_chain']}:")
+    # the log-likelihood each step of the fits reached
+    print(f"  ll after each step of {res['fit_chain']}:")
     print(f"    nested: {np.array(res['fit_traces']['nested'])}")
     for trace in res["fit_traces"]["full"]:
         print(f"    full:   {np.array(trace)}")
     if "boot_traces" in res:
-        gains = np.diff(res["boot_traces"], axis=1)
-        print(f"    refits, median gain per later optimizer: {np.median(gains, 0)}")
-        print(f"    refits, max gain per later optimizer:    {gains.max(0)}")
+        # each later step's gain over the best of the steps before it (negative: no
+        # improvement, and the step's result was not kept)
+        t = res["boot_traces"]
+        gains = t[:, 1:] - np.maximum.accumulate(t, axis=1)[:, :-1]
+        print(f"    refits, median gain per later step: {np.median(gains, 0)}")
+        print(f"    refits, max gain per later step:    {gains.max(0)}")
+        print(f"    refits, fraction improved:          {np.mean(gains > 1e-6, 0)}")
     for name, sd in res.get("sd", {}).items():
         print(f"  sd {name}: {sd}")
     if "p_boot" in res:

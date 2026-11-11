@@ -307,28 +307,38 @@ scratch with these changes.
   models, so there are no recurrent mutations. This may explain the SFS bias in the
   first run. VCFs are written with `position_transform="legacy"`, because ~9 sites per
   2 Mb region would otherwise share a rounded position.
-- **Chained optimizers.** Every fit (nested, each start of the full fit, and each
-  bootstrap refit) runs `FIT_CHAIN = ["lbfgsb", "fmin", "powell"]` on the log scale, each
-  starting from the previous result. The first run used a single L-BFGS-B for the full
-  fits and refits, and two rounds of fmin for the nested fit. The log-likelihood after
-  each optimizer is saved (`fit_traces`, `boot_traces`) and printed in the job log.
-- **200 bootstrap refits** instead of 500 (`queue_inputs.csv`). All 500 bootstrap sets
+- **Chained optimizers.** The nested fit and each start of the full fit run
+  `FIT_CHAIN = [("lbfgsb", 0), ("fmin", 0), ("fmin", 0.1)]` on the log scale: L-BFGS-B, then Nelder-Mead from its result, then Nelder-Mead again from the
+  best parameters so far perturbed by up to ~7% (`2 ** (0.1 * uniform(-1, 1))`, seeded per
+  dataset, method and fit), kept only if it improves the fit. The first run used a single
+  L-BFGS-B for the full fits and refits, and two rounds of fmin for the nested fit. The
+  log-likelihood after each step is saved (`fit_traces`, `boot_traces`) and printed in
+  the job log. (Powell after fmin was tried first and changed nothing, so it was
+  replaced by the perturbed fmin.) The bootstrap refits run `REFIT_CHAIN` (L-BFGS-B then
+  fmin, without the perturbed step), because the perturbed step never improved a refit
+  in the smoke tests and doubled to tripled the SFS refit time (user's choice,
+  2026-11-11).
+- **More datasets, fewer refits** (`queue_inputs.csv`): 100 `mig`, 100 `weak`, 200 `null`
+  (seeds 1–100 / 1–200), with 200 bootstrap refits instead of 500. All 500 bootstrap sets
   are still used for the Godambe methods.
 - **`request_memory = 8GB`** for 4 CPUs.
 
-Smoke test (laptop, one `weak` dataset, 16 regions, 8 refits, 8 processes):
+Smoke tests (laptop, one `weak` dataset, 16 regions, 8 refits, 8 processes):
 
 - **L-BFGS-B alone stops well short, especially for LD.** The fmin step after it
   improved the LD full fits by 16–336 log-likelihood units, and the LD refits by a
   median of 7 (max 72). For the SFS: the full fits by 0.05–26, the refits by about 0.1.
-  The nested fits gained 18 (LD) and 0.1 (SFS). Powell after fmin changed nothing
-  (< 1e-5). The first run's LD fits were probably under-converged too, but its data had
-  500 regions, so the size of the effect there is unknown.
-- **Time:** simulation was as before (206 s wall for 16 regions). Analysis took about
-  twice as long as the single-optimizer pilot: LD 97 s, SFS 139 s, against 53 s and 77 s.
-  Estimate on CHTC: ~40 s per LD refit and ~75 s per SFS refit, so 200 refits is
-  ~6.5 CPU-h per mig/weak dataset, a bit less than the first run's 500 single-optimizer
-  refits (~8.3 CPU-h).
+  The nested fits gained 18 (LD) and 0.1 (SFS). The first run's LD fits were probably
+  under-converged too, but its data had 500 regions, so the size of the effect there is
+  unknown.
+- **A third step adds nothing here.** Powell after fmin gained < 1e-5. The perturbed fmin
+  gained at most 4e-5 (LD) and 2e-7 (SFS), and every start of the full fit reached the
+  same log-likelihood. So the third step works as a convergence check.
+- **Time (wall, 8 processes):** simulation as before (206 s for 16 regions). Analysis:
+  single-optimizer pilot LD 53 s / SFS 77 s; L-BFGS-B + fmin + Powell 97 s / 139 s;
+  L-BFGS-B + fmin + perturbed fmin 123 s / 374 s. The perturbed fmin is expensive for
+  the SFS, because it restarts Nelder-Mead from up to 7% away. Final setup (perturbed
+  step for the main fits only): 109 s / 170 s.
 
 Before submitting on CHTC: move the first run's `data/`, `results/` and `log/` aside,
 for example to `run1_data/` etc. `simulate` and `analyze` skip outputs that already
