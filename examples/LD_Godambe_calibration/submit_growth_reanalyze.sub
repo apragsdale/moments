@@ -1,0 +1,24 @@
+# Growth / asymmetric-migration model: reanalyze one dataset of the second run of
+# godambe_calibration.py per job (growth_asym_calibration.py analyze, LD then SFS), from
+# its data/{scenario}_{seed}.pkl on the submit node. No bootstrap refits.
+# Before submitting, from this directory: mkdir -p log results_growth
+universe = container
+container_image = osdf:///chtc/staging/a/apragsdale/moments_godambe.sif
+
+executable = run_growth.sh
+arguments = $(stage) $(scenario) $(seed) $(regions) $(boot_refits) $(request_cpus)
+
+transfer_input_files = godambe_calibration.py, growth_asym_calibration.py, data/$(scenario)_$(seed).pkl
+
+transfer_output_files = results_growth/ld_$(scenario)_$(seed).pkl, results_growth/sfs_$(scenario)_$(seed).pkl
+preserve_relative_paths = true
+
+output = log/regrowth_$(scenario)_$(seed).out
+error  = log/regrowth_$(scenario)_$(seed).err
+log    = log/regrowth_$(Cluster).log
+
+request_cpus   = 1
+request_memory = 4GB
+request_disk   = 2GB
+
+queue stage, scenario, seed, regions, boot_refits from queue_growth_reanalyze.csv

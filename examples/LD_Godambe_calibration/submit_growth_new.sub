@@ -1,0 +1,24 @@
+# Growth / asymmetric-migration model: simulate and analyze one new dataset per job
+# (growth_asym_calibration.py run). Each row of queue_growth_new.csv gives the stage
+# (run), scenario, seed, number of regions and number of bootstrap refits.
+# Before submitting, from this directory: mkdir -p log data results_growth
+universe = container
+container_image = osdf:///chtc/staging/a/apragsdale/moments_godambe.sif
+
+executable = run_growth.sh
+arguments = $(stage) $(scenario) $(seed) $(regions) $(boot_refits) $(request_cpus)
+
+transfer_input_files = godambe_calibration.py, growth_asym_calibration.py
+
+transfer_output_files = data/$(scenario)_$(seed).pkl, results_growth/ld_$(scenario)_$(seed).pkl, results_growth/sfs_$(scenario)_$(seed).pkl
+preserve_relative_paths = true
+
+output = log/growth_$(scenario)_$(seed).out
+error  = log/growth_$(scenario)_$(seed).err
+log    = log/growth_$(Cluster).log
+
+request_cpus   = 4
+request_memory = 8GB
+request_disk   = 2GB
+
+queue stage, scenario, seed, regions, boot_refits from queue_growth_new.csv

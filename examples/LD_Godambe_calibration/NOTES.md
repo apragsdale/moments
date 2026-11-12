@@ -1,10 +1,9 @@
-# Godambe / LRT calibration experiment: notes (updated 2026-11-11)
+# Godambe / LRT calibration experiment: notes (updated 2026-11-12)
 
-Where we stopped: the first full run on UW–Madison CHTC (193 of 200 datasets) is
-summarized in "First full run: preliminary results". It is being redone from scratch
-with infinite-sites mutations and chained optimizers (see "Second run"); the write-up
-waits for that. The proposed fix for the LRT is described in "The LRT adjustment: method
-and intuition".
+Status: the second CHTC run is complete (100 `mig`, 100 `weak`, 200 `null` datasets,
+each analyzed with LD and with the SFS). Final results are in "Results". The adjusted
+LRT method we propose (inverse blocks with centred J, with a fallback) is written up
+in "The inverse-block LRT adjustment". Next: the write-up for others.
 
 ## Goal
 
@@ -20,44 +19,54 @@ Check, with msprime simulations run through the full workflow, that
 | Path | What it is |
 | --- | --- |
 | `godambe_calibration.py` | The experiment. `run --scenario S --seed N` simulates one dataset and analyzes it with LD and SFS; `simulate` / `analyze --method {ld,sfs}` do the stages separately; `summarize` pools all results. The docstring has usage. |
-| `submit_replicates.sub` | HTCondor submit file: one job per row of the queue file (switch the `queue` line between `queue_test.csv` and `queue_inputs.csv`), 4 CPUs, returns `data/{S}_{N}.pkl` and `results/{ld,sfs}_{S}_{N}.pkl`. |
+| `plot_coverage.py` | Makes `figures/coverage.png` and `figures/sd_ratio.png` from `results/`. |
+| `submit_replicates.sub` | HTCondor submit file: one job per row of the queue file (switch the `queue` line between `queue_test.csv` and `queue_inputs.csv`), 4 CPUs, 8 GB, returns `data/{S}_{N}.pkl` and `results/{ld,sfs}_{S}_{N}.pkl`. |
 | `run_replicate.sh` | Job script: sets one thread, runs `run --scenario $1 --seed $2 --regions $3 --boot-refits $4 --procs $5` (`$5` = `request_cpus`). |
-| `queue_inputs.csv` | Full run, `scenario, seed, regions, boot_refits`: mig 1–50, weak 1–50, null 1–100, all with 500 regions and 500 refits. |
-| `queue_test.csv` | Cluster test: seeds 9001–9002 for each scenario, 40 regions, 20 refits (~1–2 h per job). Seeds differ from the full run, so outputs don't collide; delete them before `summarize`. |
+| `queue_inputs.csv` | Second run, `scenario, seed, regions, boot_refits`: mig 1–100, weak 1–100, null 1–200, all with 500 regions and 200 refits. |
+| `queue_test.csv` | Cluster test: seeds 9001–9002 for each scenario, 40 regions, 20 refits. Seeds differ from the full run, so outputs don't collide; delete them before `summarize`. |
+| `results/` | Second-run results, one pickle per dataset and method. |
+| `results_old/` | First-run results (superseded). |
+| `figures/` | Plots used below. |
 | `NOTES.md` | This file. |
 
-The semi-parametric prototypes (`calib*.py`) and the pilot outputs were deleted on
-2026-11-10; their results are in the write-up and in the pilot section below.
+Extra checks were run from scripts in the job scratch (`power.py`, `wald.py`,
+`waldstat.py`, `fallback.py`, `schur.py`, `hesswarn.py`, `dig3.py`, `dig4.py`); the
+numbers they gave are recorded below.
 
 Related, outside this directory:
 - `../../notes_ld-godambe-review-and-calibration-2026-11-09.md`: the write-up of the review
   and the semi-parametric study (also at https://claude.ai/artifact/SGedFtxeod2MZASHBAsrzS).
 
-## Experiment design (as in the script now)
+## Experiment design
 
 - **Model:** IM. Ancestral Ne = 10,000; deme0 2,000; deme1 20,000; split 1,500
   generations ago; symmetric migration m. In genetic units (nu0, nu1, T, M, Ne) with
   M = 2 Ne m: (0.2, 2, 0.075, M, 10,000).
-- **Scenarios / datasets:** `mig` M = 2 (m = 1e-4), 50 datasets; `weak` M = 0.2
-  (m = 1e-5), 50 datasets; `null` M = 0, 100 datasets. Each dataset: 500 regions × 2 Mb,
-  40 diploids per deme, u = 1.25e-8, r = 1e-8 (lowered from 1.5e-8 by the user).
-- **Data per dataset:** each region simulated with msprime, written to VCF, parsed by
-  `moments.LD.Parsing.compute_ld_statistics` (r bins as in the docs, 0 to 1e-3) and
-  `moments.Spectrum.from_vcf` (polarized; msprime REF = ancestral). 500 bootstrap sets
-  from seeded region resampling, shared by LD and SFS (LD sets built with
-  `means_from_region_data`, as `get_bootstrap_sets` does internally; SFS sets are sums
-  of the same regions' spectra).
-- **Analysis per dataset and method:** fit nested (M = 0) and full model (full fit
-  started from the nested optimum with M0 in {0.01, 0.1, 0.5} and from the truth; best
-  kept), D = 2 ΔLL; LRT adjustments: none, current `LRT_adjust`, submatrix with centred
-  J, inverse blocks with centred J (H, J, cU over all parameters, by finite differences:
-  central, and second-order forward at M = 0, so M is never negative). For `mig` and
-  `weak`: FIM, GIM, GIM (log), and 500 bootstrap refits (bootstrap SE and percentile
-  CIs).
-- **SFS:** projected to 40 haploids per deme for inference (full size 80 is much
-  slower). Theta by multinomial scaling, reported as Ne = theta / (4 u L_total).
-  SFS `GIM (log)` uses `moments.Godambe` with log=True, which still has the step-scaling
-  problem (step = eps * log p); its intervals are for comparison only.
+- **Scenarios / datasets:** `mig` M = 2 (m = 1e-4), 100 datasets; `weak` M = 0.2
+  (m = 1e-5), 100 datasets; `null` M = 0, 200 datasets. Each dataset: 500 regions × 2 Mb,
+  40 diploids per deme, u = 1.25e-8, r = 1e-8.
+- **Simulation:** msprime with infinite-sites mutations (`discrete_genome=False`, as in
+  the moments models), written to VCF with `position_transform="legacy"`.
+- **Data per dataset:** parsed by `moments.LD.Parsing.compute_ld_statistics` (r bins as
+  in the docs, 0 to 1e-3) and `moments.Spectrum.from_vcf` (polarized; msprime REF =
+  ancestral). 500 bootstrap sets from seeded region resampling, shared by LD and SFS
+  (LD sets built with `means_from_region_data`, as `get_bootstrap_sets` does
+  internally; SFS sets are sums of the same regions' spectra).
+- **Fits:** every fit runs `FIT_CHAIN` on the log scale: L-BFGS-B, then Nelder-Mead
+  from its result, then Nelder-Mead from the best point perturbed by up to ~7% (kept
+  only if better). Nested fit (M = 0); full fit started from the nested optimum with
+  M0 in {0.01, 0.1, 0.5} and from the truth, best kept. D = 2 ΔLL.
+- **LRT adjustments:** none; the library's `LRT_adjust`; submatrix with centred J;
+  inverse blocks with centred J. H, J and the mean score cU are computed over all
+  parameters at the nested fit, by finite differences (central, and second-order
+  forward at M = 0, so M is never negative).
+- **CIs (`mig`, `weak`):** FIM, GIM, GIM (log), and 200 bootstrap refits (`REFIT_CHAIN`:
+  L-BFGS-B then Nelder-Mead, from the full fit), giving bootstrap-SE and percentile CIs.
+- **SFS:** projected to 40 haploids per deme for inference. Theta by multinomial
+  scaling, reported as Ne = theta / (4 u L_total). "M = 0" is evaluated at M = 1e-12
+  (`M_FLOOR`; see "SFS likelihood jumps at M = 0"). SFS `GIM (log)` uses
+  `moments.Godambe` with log=True, which still has the step-scaling problem (step =
+  eps * log p); its intervals are for comparison only.
 
 ## Pilot (2026-11-09)
 
@@ -136,224 +145,318 @@ SFS (n = 40 per deme) at the nested fit:
   or adding to the LRT issue.
 - The LD likelihood has no such jump (H_MM stable from step 1e-4 to 1e-2).
 
-## The LRT adjustment: method and intuition
 
-This is the proposed fix for `moments.Godambe.LRT_adjust` and
-`moments.LD.Godambe.LRT_adjust`. In the script it is `adjustment_inverse_blocks` with
-`centre=True`.
+## The inverse-block LRT adjustment
+
+This is the method we propose as an alternative to `moments.Godambe.LRT_adjust` and
+`moments.LD.Godambe.LRT_adjust`. In the script it is `adjustment_inverse_blocks(...,
+centre=True)`, with the fallback described below. The decision so far (2026-11-11) is
+to offer it later as a separate function next to the existing `LRT_adjust`, not as a
+replacement, after testing it on other models.
+
+### Summary
+
+    adj = q / tr[ (H^ψψ)⁻¹ G^ψψ ]
+
+with H^ψψ and G^ψψ the ψψ blocks of H⁻¹ and of H⁻¹ J H⁻¹, all computed over **all**
+parameters at the nested fit, and J the **centred** variance of the bootstrap scores.
+Compare adj · D with χ²_q, or with ½χ²₀ + ½χ²₁ for one parameter on a boundary. If the
+Hessian of the full model at the nested fit is ill-conditioned in the ψ direction,
+fall back to the submatrix formula with centred J, and warn.
+
+In this experiment (one IM model, testing for migration) it is the only adjustment
+that is calibrated under the null (LD .06, SFS .04 at α = .05), and with the fallback
+it has power ≥ .97 at α = .01 in every scenario. The library's `LRT_adjust` is valid
+but very conservative (null .01 at α = .05; power at α = .01 of .45 in LD `weak` and
+.00 in both SFS scenarios).
 
 ### Notation
 
 - θ = (ψ, τ): ψ are the q parameters fixed by the nested model (here ψ = M, q = 1, fixed
-  at 0), and τ are the other parameters (nu0, nu1, T, Ne), which are refit in both
-  models.
+  at 0), and τ are the other parameters (nu0, nu1, T, and Ne or theta), which are refit
+  in both models.
 - cℓ(θ): the composite log-likelihood. The LD and SFS likelihoods both treat linked
   data as independent (LD: all bins and regions; SFS: all sites).
-- U = ∇cℓ: the score.
-- H = −∇²cℓ: the sensitivity matrix, the curvature of the likelihood.
-- J = Var(U): the variability matrix, the variance of the score across datasets.
-  Estimated from the scores of the bootstrap datasets, evaluated at the parameters of
-  the nested fit.
-- D = 2 [cℓ(θ̂) − cℓ(0, τ̂₀)]: the likelihood ratio statistic. θ̂ is the full fit and τ̂₀
-  is the nested fit.
+- U = ∇cℓ: the score. H = −∇²cℓ: the sensitivity matrix (curvature).
+  J = Var(U): the variability matrix (the variance of the score between datasets).
+- θ̃ = (ψ₀, τ̃): the nested fit. θ̂: the full fit. D = 2 [cℓ(θ̂) − cℓ(θ̃)].
+- Blocks: H_ψψ, H_ψτ, ... are submatrices of H; H^ψψ = (H⁻¹)_ψψ is a block of the
+  inverse; G = H⁻¹ J H⁻¹ is the Godambe (sandwich) variance of θ̂, and G^ψψ its ψψ block.
 
-All of H, J and the mean score cU are computed **over all parameters**, at the nested
-fit.
+### Theory
 
-### Formula
+For a composite likelihood, θ̂ is asymptotically normal with variance G = H⁻¹ J H⁻¹
+(Godambe 1960), not H⁻¹, because the information identity H = J fails when the pieces
+of data are dependent. Under the null, the LRT statistic is then not χ²_q but a
+weighted sum (Kent 1982; Varin, Reid & Firth 2011, §2.3):
 
-    adj = q / tr[ (H^ψψ)⁻¹ G^ψψ ],    with  H^ψψ = (H⁻¹)_ψψ,  G^ψψ = (H⁻¹ J H⁻¹)_ψψ,
-                                       and  J = mean(U Uᵀ) − cU cUᵀ  (centred)
+    D  →  Σⱼ λⱼ Zⱼ²,    Zⱼ ~ N(0, 1) independent,
+    λⱼ = eigenvalues of (H^ψψ)⁻¹ G^ψψ.
 
-Compare adj · D with the null distribution: ½χ²₀ + ½χ²₁ here, since M = 0 is on the
-boundary (Self & Liang 1987); χ²_q in general. With q = 1 this is just
-adj = H^MM / G^MM.
+Dividing D by the mean eigenvalue λ̄ = tr[(H^ψψ)⁻¹ G^ψψ] / q matches the first moment
+of χ²_q (Rotnitzky & Jewell 1990; Geys, Molenberghs & Ryan 1999). For q = 1 there is
+one eigenvalue and the match is exact asymptotically: adj = H^ψψ / G^ψψ. For q > 1 it
+is approximate; a second-moment (Satterthwaite) version also changes the degrees of
+freedom, or the weighted-χ² distribution can be used directly.
 
-Reference: Varin, Reid & Firth (2011) §2.3. D tends to Σ λⱼ Zⱼ², where the λⱼ are the
-eigenvalues of (H^ψψ)⁻¹ G^ψψ. Dividing by the mean eigenvalue is first-order moment
-matching (Rotnitzky & Jewell 1990; Geys et al. 1999). For q = 1 it is exact
-asymptotically.
+On a boundary (M ≥ 0, ψ₀ = 0, q = 1), the unadjusted D is a mixture ½χ²₀ + ½λχ²₁
+(Self & Liang 1987, with the composite-likelihood scaling), so adj · D is compared with
+½χ²₀ + ½χ²₁. With several boundary parameters the mixture weights depend on G and are
+not ½ (chi-bar-squared), which a general implementation would need to handle.
+
+Equivalent form, which is how to compute and think about it for q = 1:
+
+    S  = H_ψψ − H_ψτ H_ττ⁻¹ H_τψ          (Schur complement = (H^ψψ)⁻¹)
+    U* = U_ψ − H_ψτ H_ττ⁻¹ U_τ            (efficient score for ψ)
+    adj = S / Var(U*)
+
+because the ψ rows of H⁻¹ are H^ψψ [I, −H_ψτ H_ττ⁻¹], so G^ψψ = H^ψψ Var(U*) H^ψψ.
+The adjustment is invariant to reparameterising τ and to rescaling ψ, so τ can be
+handled on whatever scale is convenient.
 
 ### Intuition
 
-1. **Why an adjustment is needed.** For a true likelihood, H = J (the information
-   identity), and D ~ χ²_q (Wilks). A composite likelihood of linked data counts each
-   correlated piece of data as independent evidence. The likelihood surface is then too
-   sharply peaked for how much the estimates actually vary between datasets: J is
-   "larger" than H. D inherits that overconfidence and is inflated by a factor λ. The
-   adjustment divides it back out.
+1. **Why an adjustment is needed.** A composite likelihood of linked data counts each
+   correlated piece of data as independent evidence. Its surface is too sharply peaked
+   for how much the estimates actually vary between datasets, so D is inflated by a
+   factor λ. Unadjusted, the test rejects a true null 24–28% of the time at α = .05
+   here.
 
-2. **What λ is.** For q = 1, D ≈ (ψ̂ − ψ₀)² / H^ψψ. The numerator varies across datasets
-   with the true variance of the estimate, G^ψψ: the GIM (sandwich) variance. The
-   denominator is the variance the likelihood's curvature claims, H^ψψ: the FIM-type
-   variance. So
+2. **λ is the GIM-to-FIM variance ratio.** For q = 1, D ≈ (ψ̂ − ψ₀)² / H^ψψ. The
+   numerator varies across datasets with the true variance of ψ̂, G^ψψ (the GIM
+   variance); the denominator is the variance the curvature claims, H^ψψ (the FIM
+   variance). So λ = (SD_GIM(ψ) / SD_FIM(ψ))² and adj = 1/λ. **The LRT adjustment is
+   the same correction as using GIM instead of FIM for the uncertainty of M**, applied
+   to the test. In the CI results below, FIM SEs for M are 0.28–0.45 of the true spread;
+   the median adj under the null is 0.21 (LD) and 0.11 (SFS), i.e. SD_FIM / SD_GIM
+   ≈ 0.46 and 0.33, the same order.
 
-       λ = G^ψψ / H^ψψ = (SD_GIM(M) / SD_FIM(M))²,    adj = 1 / λ.
+3. **Why inverse blocks, not submatrices.** The current `LRT_adjust` uses
+   q / tr(J_ψψ H_ψψ⁻¹): it asks how inflated the score for M is **with the other
+   parameters held fixed**. But D is a profile statistic: as M moves, T and the sizes
+   are refit and absorb part of the signal (M and T are strongly correlated). What
+   matters is the part of the M score the other parameters cannot absorb, the efficient
+   score U*, with curvature S. Only S / H_MM of the curvature survives that refitting:
+   0.10–0.16 for LD and 0.26–0.30 for the SFS here. The submatrix formula is right only
+   when H_ψτ = 0. Here the inverse-block adj is a median 1.8× (SFS) to 2.1× (LD) the
+   submatrix adj under the null, and the submatrix test is conservative (LD .01 at α = .05).
 
-   (H and J here are at the same parameters, the nested fit; the CIs in the results
-   use the full fit, so the match there is only approximate.)
-   **The LRT adjustment is the same correction as using GIM instead of FIM for the
-   uncertainty of M, applied to the test.** Median adj under the null is ~0.21 for LD
-   and ~0.11 for the SFS, so the unadjusted D is 5–10 times too large. The FIM interval
-   undercoverage in the results is the same effect.
+4. **Why J must be centred.** J should be the variance of the score: its noise. The
+   bootstrap scores, evaluated at the nested fit, average to roughly the observed
+   score there. For τ that is zero (the nested fit maximizes over τ), but for M it is
+   the slope of the likelihood in M at M = 0, which is **the evidence for migration the
+   test is trying to detect**. The uncentred mean(U Uᵀ) = Var(U) + cU cUᵀ counts that
+   signal as noise, so adj shrinks as the evidence grows, roughly as 1/D. This is why
+   the library's `LRT_adjust` caps adj · D in a narrow band (SFS 3.7–5.4, LD 1.1–17.5)
+   whatever D is, and why the SFS test with D ≈ 25,000 still gives p ≈ 0.01. It also
+   makes the test conservative under the null, since about half of null datasets have
+   a positive slope at M = 0. (Same cause: `score_stat` with uncentred J is always
+   below 1.)
 
-3. **Why inverse blocks rather than submatrices.** The current `LRT_adjust` uses
-   q / tr(J_ψψ H_ψψ⁻¹), the ψψ submatrices of H and J. That measures how inflated the
-   score for M is **with the other parameters held fixed**. But D is a profile
-   statistic: when M moves, T and the sizes are refit and absorb part of the signal (T
-   and M have correlation −0.89 in H). The relevant score is the part of the M score
-   the other parameters can't absorb, the efficient score
-   U* = U_ψ − H_ψτ H_ττ⁻¹ U_τ. Its curvature is the Schur complement
-   (H^ψψ)⁻¹ = H_ψψ − H_ψτ H_ττ⁻¹ H_τψ. Then λ = Var(U*) / (H^ψψ)⁻¹, which is exactly the
-   inverse-block formula. (The ψ rows of H⁻¹ are H^ψψ [I, −H_ψτ H_ττ⁻¹], so
-   G^ψψ = H^ψψ Var(U*) H^ψψ.) The submatrix version is right only when H_ψτ = 0, that
-   is, when M is uncorrelated with the other parameters.
+5. **Both changes are needed.** Centring alone (submatrix, centred J) is still
+   conservative under the null (LD .01 at α = .05) and loses power (LD `weak` .76 at
+   α = .01); inverse blocks with an uncentred J stayed conservative in the
+   semi-parametric study.
 
-4. **Why J must be centred.** J should be the variance of the score: its noise. At the
-   nested fit the model is not stationary in M, and the M score has a nonzero mean.
-   That mean is the evidence for migration that the test is trying to detect. The
-   uncentred mean(U Uᵀ) = Var(U) + cU cUᵀ counts that signal as noise. adj shrinks as the
-   evidence grows, so the test loses power and is conservative even under the null,
-   because at the boundary about half the null datasets have a positive M slope. It is
-   also why `score_stat` with an uncentred J is always below 1 (Sherman–Morrison:
-   s / (1 + s)).
+### When it breaks: an ill-conditioned H at the nested fit, and the fallback
 
-5. **Neither change works alone.** In both the semi-parametric study and this run,
-   centring J with submatrices, or inverse blocks with an uncentred J, stays
-   conservative. Both are needed.
+The theory assumes the nested fit is close to the full fit (the null, or local
+alternatives), so that one quadratic approximation describes the likelihood around both.
+When the nested model is badly wrong, that fails.
 
-### Numerical details that matter
+- **What happens.** In LD `mig` (M = 2, D ≈ 2,600–4,300), the Schur complement S is
+  essentially zero: S / H_MM is −0.016 to 0.011, against ≥ 0.079 in every other
+  scenario. H_ττ is positive definite in every dataset (the nested fit maximizes over
+  τ), so the trouble is entirely in the profiled M direction: once T and the sizes are
+  refit, the log-likelihood is flat, or even convex, in M at M = 0. In 54 of 100 datasets
+  S < 0, H is indefinite, and the inverse-block adj is negative (p = 1); in the rest it
+  is positive but meaningless (adj · D from 0.7 to 52 when D ≈ 3,400). Power at
+  α = .01 is .41.
+- **Why it is not a problem for the theory.** Under a fixed alternative D grows with
+  the data, so any reasonable positive adj rejects. The adjustment only needs to be
+  sensible; it does not need to be accurate there.
+- **Why the submatrix is a safe fallback.** The submatrix formula needs only
+  H_MM > 0, the curvature in M with τ held fixed, which stays positive. It ignores the
+  profiling, so it is conservative when M and τ are correlated, but with D in the
+  thousands it still rejects (power 1.00 in LD `mig` with centred J).
+- **Fallback rules compared** (inverse blocks, centred J, falling back to the
+  submatrix with centred J; power at α = .01 / .05 / .10 in LD `mig`; no other
+  scenario changes under any rule, including the null):
 
-- Finite differences at M = 0: use second-order forward differences in M, never stepping
-  to negative M. They match central differences to ~1e-6 for LD.
-- SFS: evaluate "M = 0" at M = 1e-12 (`M_FLOOR`), so every evaluation uses the same
-  integrator. See "SFS likelihood jumps at M = 0" above.
-- Start the full fit from the nested optimum (plus a few M starts), or D comes out too
-  small.
+  | Fall back when | LD `mig` power | Comment |
+  | --- | --- | --- |
+  | adj ≤ 0 | .95 / .97 / .97 | misses datasets with a tiny positive adj |
+  | smallest eigenvalue of correlation-scaled H < 0.005 | 1 / 1 / 1 | the rule used by the new library warning; other scenarios ≥ 0.016 (3× margin) |
+  | S / H_MM < ~0.03 | 1 / 1 / 1 | other scenarios ≥ 0.079 (7× margin); measures the profiled M curvature directly |
+  | adj_ib < adj_sub | 1 / 1 / 1 | also falls back in all SFS `mig` datasets (ratio 0.73), harmlessly here; not principled, since the submatrix adj can be too large in other models |
 
-### Known weakness: H can be indefinite at the nested fit
+  **Recommendation:** fall back on the curvature ratio S / H_ψψ (for q > 1, the
+  smallest eigenvalue of H_ψψ^(−1/2) S H_ψψ^(−1/2)), with a threshold to be set on
+  other models, and always warn when it triggers. It is the quantity that actually
+  goes wrong, it separates the cases with a wide margin here, and it is cheap. The
+  correlation-scaled eigenvalue rule (used by the warning now in the library) is a
+  reasonable proxy.
+- **Untested alternative:** evaluate H and J at the full fit instead, where H is
+  positive definite (it is a maximum). This is asymptotically equivalent under the null
+  and local alternatives, but needs a second set of bootstrap scores.
 
-In LD `mig` (M = 2), the inverse-block adj came out **negative in 30 of 46 datasets**.
-The full-parameter H at the nested fit has one negative eigenvalue. Its eigenvector
-trades nu1 against M (about (0, 0.70, 0, −0.71, 0)). When the nested model is badly
-wrong, its fit can sit at a saddle of the full likelihood, and H⁻¹ then has the wrong
-sign. The submatrix formula only needs H_MM > 0, so it doesn't see this.
+### Practical implementation
 
-- It happened only under strong alternatives, where D ≈ 3,000. It never happened under
-  the null or with weak migration (0 of 147 datasets).
-- A negative adj · D gives p = 1, so power in LD `mig` at α = 0.05 is 0.30 instead of
-  1.00.
-- Possible guards (not tested):
-  - check that H is positive definite and warn or raise if not;
-  - use H (and J) at the full fit, which is asymptotically equivalent under the null
-    and local alternatives;
-  - treat adj ≤ 0 as "reject" when D is large.
+- **Inputs.** The full model function, the nested fit given as full-model parameters
+  with ψ at its fixed value, the data, the bootstrap replicates (the same ones as for
+  GIM), and the indices of ψ. Use the nested fit, not the full fit, for H, J and cU.
+- **Compute over all parameters.** H, the bootstrap scores, cU and J over all k
+  parameters, including theta (SFS, multinomial) or Ne (LD), which are nuisance
+  parameters like any other τ.
+- **Centre J:** J = mean(U Uᵀ) − cU cUᵀ, i.e. the sample covariance of the bootstrap
+  scores.
+- **Compute the Schur form, not explicit inverses:** S and Var(U*) via solves with
+  H_ττ (positive definite at the nested fit), then adj = q / tr(S⁻¹ Var(U*)). The
+  conditioning check S / H_ψψ comes for free.
+- **Finite differences at a boundary:** ψ₀ = 0 is the edge of the parameter space.
+  Use forward differences in ψ so the model is never evaluated at negative migration;
+  second-order forward differences matched central ones to ~1e-6 for LD here (the
+  library's `get_hess` uses first-order forward steps of absolute size `eps` for
+  parameters equal to zero).
+- **SFS integrator jump at M = 0:** `Spectrum.integrate` switches integrators when all
+  migration rates are exactly 0, which puts a jump of ~0.025 log-likelihood units at
+  M = 0 and an error of ~20% into H_MM. Evaluate the nested model at a tiny positive M
+  (1e-12 here), both for the nested fit and the derivatives. LD has no jump.
+- **Fits must be converged.** D, the nested fit (where the scores are evaluated) and
+  the full fit all need to be at their optima: the full fit started from the nested
+  optimum and a few M values, and L-BFGS-B followed by Nelder-Mead. Under-converged
+  refits caused the too-narrow LD bootstrap in the first run.
+- **Cost.** One Hessian over all k parameters (about 2k² + 1 model evaluations) plus
+  the bootstrap gradients, which reuse the same 2k model evaluations for every
+  replicate (the model does not depend on the data). The existing `LRT_adjust`
+  differentiates only in ψ (about 3 evaluations for q = 1), so the new method costs
+  about as much as one `GIM_uncert` call.
+- **Number of bootstrap replicates.** For q = 1 adj depends on the single variance
+  Var(U*), whose relative error is about √(2/B): ~6% for B = 500, ~14% for B = 100.
+- **Report:** adj, adj · D, the p-value, whether the fallback was used, and the
+  conditioning value.
+- **Open questions for the library version:** the fallback threshold on other models
+  (more parameters, more populations, pulses, size changes); q > 1 (second-moment
+  correction, chi-bar-squared weights on boundaries); whether to offer H and J at the
+  full fit; and checking that the one-sided Wald test from GIM at the full fit is
+  calibrated (the null jobs did not compute a full-fit GIM).
 
-## First full run: preliminary results (2026-11-11)
+## Run history
 
-Copied from CHTC to `results/` (test seeds 9001–9002 excluded). There are 46 `mig`,
-47 `weak` and 100 `null` datasets for each method; 7 jobs were still running. Shown by
-`python godambe_calibration.py summarize`. Rerun everything once the last jobs are in.
+- **First run (2026-11-11, superseded; outputs in `results_old/`).** 50 `mig`,
+  50 `weak`, 100 `null` datasets, finite-sites mutations, one L-BFGS-B per full fit and
+  refit, 500 refits. It showed the same LRT picture as the final run, plus three
+  problems: SFS fits biased by ~1 SD for Ne and nu0, an LD `weak` bootstrap that was too
+  narrow (coverage of M 0.62), and negative inverse-block adjustments in LD `mig`.
+- **Second run (this one).** Rerun from scratch with infinite-sites mutations, the
+  chained optimizers (`FIT_CHAIN`, `REFIT_CHAIN`), twice the datasets and 200 refits.
+  Smoke tests before submitting showed L-BFGS-B alone stops well short, especially for
+  LD (Nelder-Mead after it gained 16–336 log-likelihood units on LD full fits, median 7
+  on refits), and that a third step (Powell, or the perturbed Nelder-Mead) gains nothing
+  more, so it serves as a convergence check. The first two problems are gone in the
+  second run (below); the third is a property of the method, described above.
 
-**LRT under the null.** Fraction of p-values below α = .01 / .05 / .10 / .25 (±~0.02
-at 0.05):
+## Results (second run, final, 2026-11-12)
+
+All 400 datasets per method are in (100 `mig`, 100 `weak`, 200 `null`). Tables from
+`python godambe_calibration.py summarize`, figures from `plot_coverage.py`.
+
+### Confidence intervals
+
+![95% CI coverage by parameter, for FIM, GIM, bootstrap-SE and bootstrap-percentile intervals, in four panels (LD and SFS, weak and strong migration)](figures/coverage.png)
+
+![Mean standard error from FIM, GIM and the bootstrap, relative to the empirical SD of the estimates, by parameter, in the same four panels](figures/sd_ratio.png)
+
+95% CI coverage (100 datasets; ±~0.04):
+
+| | FIM | GIM | Bootstrap SE | Bootstrap percentile |
+| --- | --- | --- | --- | --- |
+| LD `mig` | .57–.80 | .94–.99 | .94–.98 | .93–.98 |
+| LD `weak` | .50–.78 | .90–.94 | .90–.94 | .91–.92 |
+| SFS `mig` | .39–.63 | .94–.97 | .94–.97 | .93–.97 |
+| SFS `weak` | .46–.66 | .93–.97 | .92–.97 | .91–.96 |
+
+- **FIM undercovers badly** (as low as .39 for M in SFS `mig`): its SEs are 0.28–0.66
+  of the spread of the estimates. This is the composite-likelihood overconfidence that
+  the GIM and the LRT adjustment correct.
+- **GIM and the bootstrap agree closely** for every parameter (SEs within ~2% of each
+  other), and are within about 10–20% of the empirical SD: slightly narrow in LD `weak`
+  (0.90–0.97, except Ne 1.01), slightly wide in SFS and LD `mig` (up to 1.20 for SFS
+  `mig` T). Coverage is .90–.99. The lowest is LD `weak` nu0 (.90; GIM SD 10% below the
+  empirical SD).
+- **So the Godambe approach gives what the bootstrap refits give**, at the cost of one
+  Hessian and the bootstrap scores instead of one optimization per replicate.
+- GIM (log) is close to GIM for LD (M in LD `weak`: .90 against .94); for the SFS it is 1.00 for most parameters (too wide,
+  from the step-size problem with `log=True` in `moments.Godambe`).
+- Bias of the full-fit estimates is at most 0.18 SD (LD `mig` M). The first run's SFS
+  bias is gone.
+
+### LRT under the null
+
+Fraction of p < α = .01 / .05 / .10 / .25 (200 datasets; ±~0.015 at α = .05):
 
 | Adjustment | LD | SFS |
 | --- | --- | --- |
-| None | .14 / .21 / .23 / .38 | .25 / .32 / .36 / .40 |
-| `LRT_adjust` (library) | .00 / .00 / .03 / .17 | .00 / .01 / .05 / .15 |
-| Submatrix, centred J | .00 / .00 / .04 / .17 | .01 / .03 / .06 / .15 |
-| Inverse blocks, centred J | .00 / .04 / .09 / .22 | .01 / .06 / .07 / .27 |
+| None | .15 / .24 / .27 / .35 | .24 / .28 / .35 / .42 |
+| `LRT_adjust` (library) | .00 / .01 / .04 / .18 | .00 / .01 / .04 / .20 |
+| Submatrix, centred J | .00 / .01 / .04 / .18 | .01 / .02 / .04 / .20 |
+| **Inverse blocks, centred J** | .01 / .06 / .10 / .26 | .01 / .04 / .10 / .25 |
+| `moments.Godambe.Wald_stat`* | .11 / .20 / .27 / – | .01 / .10 / .17 / – |
 
-About 57% of null datasets have D = 0.
+About half the null datasets have D ≈ 0 (55% LD, 51% SFS have D < 1e-3), as expected
+on the boundary. The fallback never triggers under the null, so it does not change
+these rates. *`Wald_stat` computed from the stored nested-fit H and J (GIM over M only,
+uncentred J): it rejects a true null far too often.
 
-**Power:**
+### Power
 
-- Weak migration (M = 0.2), α = 0.01:
-  - LD: inverse blocks 0.96, `LRT_adjust` 0.51.
-  - SFS: `LRT_adjust` 0.00, inverse blocks 1.00.
-- Strong migration (M = 2), SFS: `LRT_adjust` shrinks D ≈ 25,000 to adj · D ≈ 5, so
-  p ≈ 0.011. It rejects at 0.05 but never at 0.01.
-- Strong migration (M = 2), LD: inverse blocks only 0.30, because of the negative
-  adjustments described above.
+Fraction of p < α = .001 / .01 / .05 / .10 (100 datasets each):
 
-**95% CI coverage** (n ≈ 46; ±~0.03):
+| Adjustment | LD `weak` | LD `mig` | SFS `weak` | SFS `mig` |
+| --- | --- | --- | --- | --- |
+| None | .99 / 1 / 1 / 1 | 1 / 1 / 1 / 1 | 1 / 1 / 1 / 1 | 1 / 1 / 1 / 1 |
+| `LRT_adjust` | .00 / .45 / .94 / .98 | 1 / 1 / 1 / 1 | .00 / .00 / 1 / 1 | .00 / .00 / 1 / 1 |
+| Submatrix, centred J | .44 / .76 / .97 / .98 | 1 / 1 / 1 / 1 | 1 / 1 / 1 / 1 | 1 / 1 / 1 / 1 |
+| Inverse blocks, centred J | .78 / .97 / .99 / 1 | .35 / .41 / .43 / .43 | 1 / 1 / 1 / 1 | 1 / 1 / 1 / 1 |
+| **Inverse blocks + fallback** (conditioning rule) | .78 / .97 / .99 / 1 | 1 / 1 / 1 / 1 | 1 / 1 / 1 / 1 | 1 / 1 / 1 / 1 |
 
-- FIM undercovers: 0.70–0.85 LD `mig`, 0.40–0.72 LD `weak`, 0.38–0.66 SFS.
-- GIM covers 0.85–1.00 and is slightly conservative: its mean SD is up to ~35% above
-  the spread of the estimates (SFS T: 0.0156 against 0.0115 of the truth).
-- GIM (log) is similar; for the SFS it is 0.98–1.00.
+Median adj · D (`LRT_adjust` / submatrix / inverse blocks): LD `weak` 5.3 / 9.0 / 15.5
+(median D 90); SFS `weak` 3.9 / 39 / 63 (D 807); LD `mig` 13.6 / 341 / −2.5 (D 3,430);
+SFS `mig` 5.2 / 747 / 552 (D 25,470).
 
-**Issues to look into (hypotheses, not checked):**
+For comparison, the one-sided Wald test of M with the GIM SE at the full fit rejects
+at α = .01 / .05 in .97 / .99 of LD `weak` datasets and 1 / 1 elsewhere, and the
+bootstrap refits (fraction of M* ≤ 0 below α) in .94 / .98 and 1 / 1; their false
+positive rates were not measured (the null jobs have no full-fit GIM or refits).
 
-- **SFS fits are slightly biased:** −0.2% to −0.5% relative. That is about 1 SD for Ne
-  and nu0, which lowers SFS coverage for those (GIM: Ne 0.85 `mig`, 0.91 `weak`). Guess:
-  msprime's finite-sites mutations against moments' infinite-sites model; recurrent
-  hits would lower diversity and pull Ne down. Check: count multi-hit sites in a
-  simulated region.
-- **LD `weak` bootstrap is too narrow:** the bootstrap SD of M is 0.155 of the truth,
-  against an empirical SD of 0.27 and a GIM SD of 0.24. The other parameters are ~18%
-  too narrow. Bootstrap-SE coverage of M is 0.62. LD `mig` and SFS bootstraps are fine.
-  Guess: the L-BFGS-B refits start from `p_full` and stop early where the surface is
-  flat near small M. Check: refit some bootstrap sets from perturbed starts.
-- **Negative inverse-block adjustment under strong migration** (above).
+### The new library warning
 
-## Second run (prepared 2026-11-11)
+The `LRT_adjust` warning added on `devel` (smallest eigenvalue of the correlation-scaled
+H at the nested fit < 0.005) fires on 100/100 LD `mig` datasets and on none of the
+other 700. Smallest eigenvalue: LD `mig` −0.004 to 0.003; LD `null`/`weak` and SFS
+`mig` ≥ 0.016; SFS `null`/`weak` ≥ 0.051.
 
-The first run's results above are superseded: all datasets are being rerun from
-scratch with these changes.
+### Convergence
 
-- **Infinite sites.** `sim_mutations(..., discrete_genome=False)`, as in the moments
-  models, so there are no recurrent mutations. This may explain the SFS bias in the
-  first run. VCFs are written with `position_transform="legacy"`, because ~9 sites per
-  2 Mb region would otherwise share a rounded position.
-- **Chained optimizers.** The nested fit and each start of the full fit run
-  `FIT_CHAIN = [("lbfgsb", 0), ("fmin", 0), ("fmin", 0.1)]` on the log scale: L-BFGS-B, then Nelder-Mead from its result, then Nelder-Mead again from the
-  best parameters so far perturbed by up to ~7% (`2 ** (0.1 * uniform(-1, 1))`, seeded per
-  dataset, method and fit), kept only if it improves the fit. The first run used a single
-  L-BFGS-B for the full fits and refits, and two rounds of fmin for the nested fit. The
-  log-likelihood after each step is saved (`fit_traces`, `boot_traces`) and printed in
-  the job log. (Powell after fmin was tried first and changed nothing, so it was
-  replaced by the perturbed fmin.) The bootstrap refits run `REFIT_CHAIN` (L-BFGS-B then
-  fmin, without the perturbed step), because the perturbed step never improved a refit
-  in the smoke tests and doubled to tripled the SFS refit time (user's choice,
-  2026-11-11).
-- **More datasets, fewer refits** (`queue_inputs.csv`): 100 `mig`, 100 `weak`, 200 `null`
-  (seeds 1–100 / 1–200), with 200 bootstrap refits instead of 500. All 500 bootstrap sets
-  are still used for the Godambe methods.
-- **`request_memory = 8GB`** for 4 CPUs.
-
-Smoke tests (laptop, one `weak` dataset, 16 regions, 8 refits, 8 processes):
-
-- **L-BFGS-B alone stops well short, especially for LD.** The fmin step after it
-  improved the LD full fits by 16–336 log-likelihood units, and the LD refits by a
-  median of 7 (max 72). For the SFS: the full fits by 0.05–26, the refits by about 0.1.
-  The nested fits gained 18 (LD) and 0.1 (SFS). The first run's LD fits were probably
-  under-converged too, but its data had 500 regions, so the size of the effect there is
-  unknown.
-- **A third step adds nothing here.** Powell after fmin gained < 1e-5. The perturbed fmin
-  gained at most 4e-5 (LD) and 2e-7 (SFS), and every start of the full fit reached the
-  same log-likelihood. So the third step works as a convergence check.
-- **Time (wall, 8 processes):** simulation as before (206 s for 16 regions). Analysis:
-  single-optimizer pilot LD 53 s / SFS 77 s; L-BFGS-B + fmin + Powell 97 s / 139 s;
-  L-BFGS-B + fmin + perturbed fmin 123 s / 374 s. The perturbed fmin is expensive for
-  the SFS, because it restarts Nelder-Mead from up to 7% away. Final setup (perturbed
-  step for the main fits only): 109 s / 170 s.
-
-Before submitting on CHTC: move the first run's `data/`, `results/` and `log/` aside,
-for example to `run1_data/` etc. `simulate` and `analyze` skip outputs that already
-exist, so old files would otherwise be kept and nothing would be rerun.
+- Final log-likelihood across the 4 full-fit starts: median spread < 1e-4; > 0.1 in
+  only 5 LD `weak`, 5 LD `null` and 7 SFS `null` datasets (max 0.56; the best start is
+  used).
+- The perturbed Nelder-Mead step never gained more than 0.01 on any full or nested fit.
+- Nelder-Mead after L-BFGS-B in the refits: median gain 0.35 (LD `mig`) to 2.6 (SFS
+  `weak`), max 68. L-BFGS-B alone is not enough for the refits.
 
 ## Next steps
 
-1. Pull the branch on CHTC, move the first run's outputs aside, and submit the second
-   run (`queue_inputs.csv`). Then copy `results/` and run `summarize`.
-2. Optionally check the two hypotheses above (SFS bias; LD bootstrap refits).
-3. Library fix: inverse blocks with centred J in both `LRT_adjust` functions, with a
-   guard for an indefinite H, and M = 0 handled without crossing the SFS integrator
-   jump. Open the issues first (texts drafted).
-4. Done 2026-11-10: seed per job; the SFS `M_FLOOR`; the CHTC test run. The SFS
-   projection stayed at 40 haploids per deme.
+1. Write up the experiment and the method for others (from this file).
+2. Library, later version (decided 2026-11-11): add the inverse-block adjustment as a
+   separate function next to the existing `LRT_adjust` (not a replacement), in both
+   `moments.Godambe` and `moments.LD.Godambe`, as specified in "Practical
+   implementation" above. First test it on other demographic models, which will also
+   set the fallback threshold.
+3. Optional extra run: add a full-model fit with GIM SEs to the null jobs, to check the
+   false positive rate of the one-sided Wald test that the docs now suggest.
+4. Done in this round: the `LRT_adjust` Hessian warning and the docs note on
+   conservative LRTs with alternatives (PR from `lrt_hessian_warning` into `devel`).
 
 ## Related open items
 
