@@ -108,6 +108,11 @@ for _name, _m in base.SCENARIOS.items():
     _M = 2 * NE * _m
     SCENARIOS[_name] = dict(p=[_NU0, 2, 2, _T, _M, _M, NE], source="run2")
 
+# Optimizer steps (see base.FIT_CHAIN): the full fits use base.FIT_CHAIN (L-BFGS-B,
+# Nelder-Mead, perturbed Nelder-Mead), the nested fits and the bootstrap refits only
+# the first two steps.
+NESTED_CHAIN = base.REFIT_CHAIN
+
 # The number of bootstrap refits of the full model per dataset (fewer than in the
 # first model: the growth model is slower to fit, and the CIs are a side result here)
 BOOT_REFITS = 100
@@ -555,9 +560,12 @@ def _start(f, floor=0.01):
 
 
 def fit_nested(model, test, p_true, key):
+    # NESTED_CHAIN: without the perturbed step, which never gained more than 0.01
+    # log-likelihood units on a nested fit in the second run, and is the most
+    # expensive step for the SFS. The full fits keep it, as a convergence check.
     t = TESTS[test]
     f0 = _start(np.append(t["d_to_free"](p_true[:6]), p_true[6]))
-    return model.fit(t["free_to_d"], f0, t["free_bounds"], key=key)
+    return model.fit(t["free_to_d"], f0, t["free_bounds"], key=key, chain=NESTED_CHAIN)
 
 
 def fit_full(model, starts, key0):
@@ -774,6 +782,7 @@ def analyze_dataset(method, path, procs, boot_refits):
         regions=data["regions"],
         p_true=p_true,
         fit_chain=base.FIT_CHAIN,
+        nested_chain=NESTED_CHAIN,
         refit_chain=base.REFIT_CHAIN,
     )
 
