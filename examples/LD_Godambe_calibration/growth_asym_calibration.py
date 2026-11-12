@@ -92,7 +92,10 @@ NREF = 10000  # reference size for building graphs from genetic-unit parameters
 POPS = base.POPS
 PARAM_NAMES = ["nu0", "nu1_0", "nu1_F", "T", "M01", "M10", "Ne"]
 RATES = [4, 5]  # indices of the migration rates (boundary at zero)
-LOWER = np.array([1e-3, 1e-3, 1e-3, 1e-3, 0, 0, 100])
+# Migration rates are bounded below by MIGRATION_LOWER, not zero, so that fits without
+# migration stop at a negligible rate instead of running towards zero.
+MIGRATION_LOWER = 1e-8
+LOWER = np.array([1e-3, 1e-3, 1e-3, 1e-3, MIGRATION_LOWER, MIGRATION_LOWER, 100])
 UPPER = np.array([100, 100, 100, 10, 100, 100, 1e6])
 
 # True values, in genetic units. "source" says whether the dataset is simulated here
@@ -568,23 +571,42 @@ def fit_nested(model, test, p_true, key):
     return model.fit(t["free_to_d"], f0, t["free_bounds"], key=key, chain=NESTED_CHAIN)
 
 
+# Full fits whose log-likelihoods differ by less than this agree (see fit_full)
+FULL_FIT_AGREE = 0.01
+
+
 def fit_full(model, starts, key0):
-    """Fits the full model from each start, and keeps the best fit."""
+    """
+    Fits the full model from the first two starts. If their log-likelihoods differ by
+    more than FULL_FIT_AGREE, also from the third. Keeps the best fit, and returns
+    the log-likelihood after each step for each start used.
+    """
     identity = list(range(6))
-    best, traces = (None, -np.inf), []
-    for k, p in enumerate(starts):
+    fits, traces = [], []
+    for k, p in enumerate(starts[:3]):
+        if k == 2 and abs(fits[0][1] - fits[1][1]) <= FULL_FIT_AGREE:
+            break
         p_fit, ll, trace = model.fit(
             lambda f: np.asarray(f, dtype=float), _start(p), identity, key=key0 + k
         )
+        fits.append((p_fit, ll))
         traces.append(trace)
-        if ll > best[1]:
-            best = (p_fit, ll)
+    best = max(fits, key=lambda f: f[1])
     return best[0], best[1], traces
 
 
 # -----------------------------------------------------------------------------
 # Godambe matrices, adjustments, and the asymptotic null distribution of D
 # -----------------------------------------------------------------------------
+
+# Migration rates below this (zero, or at MIGRATION_LOWER) use forward differences with
+# this absolute step: a central step relative to such a small rate would be far too
+# small for accurate second differences, and an absolute one would cross zero.
+FORWARD_BELOW = 1e-3
+
+
+def _forward(q, rates):
+    return [i in rates and q[i] < FORWARD_BELOW for i in range(len(q))]
 
 
 def godambe_matrices(
@@ -593,13 +615,15 @@ def godambe_matrices(
     """
     As base.godambe_matrices, in any coordinates: H of the negative log-likelihood
     and the uncentred J and mean score cU over the bootstrap replicates, at q0.
-    forward[i] marks the parameters at zero on a boundary (second-order forward
-    differences, so they are never evaluated below zero); others use central
-    differences, with step rel_step * |q| or zero_step when q is zero.
+    forward[i] marks the parameters at or near zero on a boundary (second-order
+    forward differences with step zero_step, so they are never evaluated below
+    zero); others use central differences, with step rel_step * |q| or zero_step
+    when q is zero.
     """
     q0 = np.array(q0, dtype=float)
     n = len(q0)
-    h = np.where(q0 == 0, zero_step, rel_step * np.abs(q0))
+    forward = np.asarray(forward, dtype=bool)
+    h = np.where(forward | (q0 == 0), zero_step, rel_step * np.abs(q0))
     E = np.diag(h)
 
     def d1(q, i, x):
@@ -721,7 +745,7 @@ def test_quantities(model, test, p_nested, D, seed_key):
     t = TESTS[test]
     psi = t["psi"]
     q0 = t["to_test"](p_nested)
-    forward = [(i in t["rates"]) and q0[i] == 0 for i in range(len(q0))]
+    forward = _forward(q0, t["rates"])
     x0, boots = model.data_and_bootstraps()
 
     def loglik(q, x):
@@ -729,18 +753,37 @@ def test_quantities(model, test, p_nested, D, seed_key):
 
     H, J, cU = godambe_matrices(loglik, q0, x0, boots, forward)
     out = dict(q_nested=q0, H=H, J=J, cU=cU)
-    out["adj_LRT_adjust"] = model.lrt_adjust(test, q0)
-    out["adj_submatrix"] = base.adjustment_submatrix(H, J, cU, psi, True)
-    out["adj_inverse_blocks"] = base.adjustment_inverse_blocks(H, J, cU, psi, True)
-    out["min_eig"], out["schur_ratio"] = conditioning(H, psi)
-    Hpp_inv, Gpp = psi_covariances(H, J, cU, psi)
+    # each quantity is NaN if a matrix it needs can't be inverted, so that one
+    # ill-conditioned test doesn't stop the analysis
+    nan = np.nan
+    out["adj_LRT_adjust"] = _safe("LRT_adjust", nan, model.lrt_adjust, test, q0)
+    out["adj_submatrix"] = _safe(
+        "submatrix", nan, base.adjustment_submatrix, H, J, cU, psi, True
+    )
+    out["adj_inverse_blocks"] = _safe(
+        "inverse blocks", nan, base.adjustment_inverse_blocks, H, J, cU, psi, True
+    )
+    out["min_eig"], out["schur_ratio"] = _safe(
+        "conditioning", (nan, nan), conditioning, H, psi
+    )
+    covs = _safe("psi covariances", None, psi_covariances, H, J, cU, psi)
     if len(psi) == 2:
-        out["chibar_w_G"] = chibar_weights(Gpp)
-        out["chibar_w_H"] = chibar_weights(Hpp_inv)
+        nan3 = np.full(3, nan)
+        out["chibar_w_G"] = nan3 if covs is None else chibar_weights(covs[1])
+        out["chibar_w_H"] = nan3 if covs is None else chibar_weights(covs[0])
     rng = np.random.default_rng(seed_key)
-    null = mc_null(H, J, cU, psi, t["boundary"], rng)
+    null = _safe("Monte Carlo null", None, mc_null, H, J, cU, psi, t["boundary"], rng)
     out["p_mc"] = np.nan if null is None else np.mean(null >= D)
     return out
+
+
+def _safe(name, fallback, func, *args):
+    # func(*args), or fallback (with a line in the log) if a matrix is singular
+    try:
+        return func(*args)
+    except np.linalg.LinAlgError as err:
+        print(f"    {name}: {err}; recorded as NaN", flush=True)
+        return fallback
 
 
 # -----------------------------------------------------------------------------
@@ -786,15 +829,18 @@ def analyze_dataset(method, path, procs, boot_refits):
         refit_chain=base.REFIT_CHAIN,
     )
 
-    # nested fits, then the full fit from each nested optimum and from the truth
+    # nested fits, then the full fit (see below)
     t0 = time.time()
     nested = {}
     for k, test in enumerate(TESTS):
         nested[test] = fit_nested(model, test, p_true, key=k)
         _progress(f"nested fit ({test})", t0)
-    starts = [p for p, _, _ in nested.values()] + [p_true]
+    # full fit from the best nested optimum and from the truth, and if those disagree,
+    # also from the next-best nested optimum
+    by_ll = sorted(nested.values(), key=lambda fit: -fit[1])
+    starts = [by_ll[0][0], p_true, by_ll[1][0]]
     p_full, ll_full, traces_full = fit_full(model, starts, key0=10)
-    _progress(f"full fit ({len(starts)} starts)", t0)
+    _progress(f"full fit ({len(traces_full)} starts)", t0)
     res.update(p_full=p_full, ll_full=ll_full, traces_full=traces_full)
 
     res["tests"] = {}
@@ -814,7 +860,7 @@ def analyze_dataset(method, path, procs, boot_refits):
 
     # FIM and GIM at the full fit, in the model's coordinates, with forward
     # differences for migration rates at zero
-    forward = [i in RATES and p_full[i] == 0 for i in range(7)]
+    forward = _forward(p_full, RATES)
     x0, boots = model.data_and_bootstraps()
     H, J, cU = godambe_matrices(model.loglik, p_full, x0, boots, forward)
     res.update(H_full=H, J_full=J, cU_full=cU)
@@ -874,7 +920,11 @@ def _p_values(t, D, test):
     for name in ["LRT_adjust", "submatrix", "inverse_blocks"]:
         for wname, w in weights.items():
             label = f"{name} ({wname})" if wname else name
-            out[label] = moments.Godambe.sum_chi2_ppf(t[f"adj_{name}"] * D, w)
+            adj = t[f"adj_{name}"]
+            if np.isnan(adj) or np.any(np.isnan(w)):
+                out[label] = np.nan
+            else:
+                out[label] = moments.Godambe.sum_chi2_ppf(adj * D, w)
     out["Monte Carlo"] = t["p_mc"]
     return out
 
