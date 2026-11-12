@@ -1,0 +1,6 @@
+# outputs of runs
+data/
+results/
+log/
+results_growth/
+results_old/

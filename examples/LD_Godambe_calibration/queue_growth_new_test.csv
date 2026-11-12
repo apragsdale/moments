@@ -1,0 +1,4 @@
+run, g_nomig, 9001, 40, 4
+run, g_sym, 9001, 40, 4
+run, g_oneway, 9001, 40, 4
+run, g_asym, 9001, 40, 4

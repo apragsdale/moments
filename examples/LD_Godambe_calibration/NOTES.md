@@ -24,6 +24,9 @@ Check, with msprime simulations run through the full workflow, that
 | `run_replicate.sh` | Job script: sets one thread, runs `run --scenario $1 --seed $2 --regions $3 --boot-refits $4 --procs $5` (`$5` = `request_cpus`). |
 | `queue_inputs.csv` | Second run, `scenario, seed, regions, boot_refits`: mig 1–100, weak 1–100, null 1–200, all with 500 regions and 200 refits. |
 | `queue_test.csv` | Cluster test: seeds 9001–9002 for each scenario, 40 regions, 20 refits. Seeds differ from the full run, so outputs don't collide; delete them before `summarize`. |
+| `growth_asym_calibration.py` | Second model (draft, not yet run): deme1 grows, migration asymmetric, built with demes; four LRTs (asym, mig with q = 2, oneway, growth) and CIs. Simulates new datasets (`g_*` scenarios, stored compactly) and reanalyzes the second run's datasets. |
+| `compact_data.py` | Shrinks the second run's dataset pickles (~30 MB → ~6.5 MB) by storing the SFS bootstraps projected to 40 haploids in float32. Lossy only for larger projections. |
+| `run_growth.sh`, `submit_growth_new.sub`, `submit_growth_reanalyze.sub`, `submit_compact.sub`, `queue_growth_new.csv`, `queue_growth_reanalyze.csv` | CHTC files for the second model: new datasets (stage `run`); reanalysis of the second run's datasets, which also shrinks them (stage `analyze`); shrinking only (stage `compact`). |
 | `results/` | Second-run results, one pickle per dataset and method. |
 | `results_old/` | First-run results (superseded). |
 | `figures/` | Plots used below. |

@@ -778,11 +778,14 @@ def analyze_dataset(method, path, procs, boot_refits):
     )
 
     # nested fits, then the full fit from each nested optimum and from the truth
+    t0 = time.time()
     nested = {}
     for k, test in enumerate(TESTS):
         nested[test] = fit_nested(model, test, p_true, key=k)
+        _progress(f"nested fit ({test})", t0)
     starts = [p for p, _, _ in nested.values()] + [p_true]
     p_full, ll_full, traces_full = fit_full(model, starts, key0=10)
+    _progress(f"full fit ({len(starts)} starts)", t0)
     res.update(p_full=p_full, ll_full=ll_full, traces_full=traces_full)
 
     res["tests"] = {}
@@ -798,6 +801,7 @@ def analyze_dataset(method, path, procs, boot_refits):
         seed_key = _seed_sequence(scenario, data["seed"], 3, k)
         out.update(test_quantities(model, test, p_nested, D, seed_key))
         res["tests"][test] = out
+        _progress(f"Godambe matrices and adjustments ({test})", t0)
 
     # FIM and GIM at the full fit, in the model's coordinates, with forward
     # differences for migration rates at zero
@@ -805,6 +809,7 @@ def analyze_dataset(method, path, procs, boot_refits):
     x0, boots = model.data_and_bootstraps()
     H, J, cU = godambe_matrices(model.loglik, p_full, x0, boots, forward)
     res.update(H_full=H, J_full=J, cU_full=cU)
+    _progress("FIM and GIM at the full fit", t0)
     try:
         Hi = np.linalg.inv(H)
         res["sd"] = {
@@ -819,7 +824,13 @@ def analyze_dataset(method, path, procs, boot_refits):
         refits = base._map(_refit, args, procs)
         res["p_boot"] = np.array([r[0] for r in refits])
         res["boot_traces"] = np.array([r[2] for r in refits])
+        _progress(f"{boot_refits} bootstrap refits", t0)
     return res
+
+
+def _progress(stage, t0):
+    # for the job logs: what finished, and the time since the analysis started
+    print(f"  [{time.time() - t0:7.0f} s] {stage}", flush=True)
 
 
 def results_path(method, scenario, seed):

@@ -1,0 +1,24 @@
+# Shrink the second run's datasets on the submit node (compact_data.py), one job per
+# file: each job takes data/{scenario}_{seed}.pkl in, rewrites it (~30 MB -> ~6.5 MB),
+# and returns it in its place. Use this to free space before the reanalysis; the
+# reanalysis jobs (submit_growth_reanalyze.sub) also do it, and skip files already done.
+# Before submitting, from this directory: mkdir -p log
+universe = container
+container_image = osdf:///chtc/staging/a/apragsdale/moments_godambe.sif
+
+executable = run_growth.sh
+arguments = compact $(scenario) $(seed) 0 0 1
+
+transfer_input_files = godambe_calibration.py, compact_data.py, data/$(scenario)_$(seed).pkl
+transfer_output_files = data/$(scenario)_$(seed).pkl
+preserve_relative_paths = true
+
+output = log/compact_$(scenario)_$(seed).out
+error  = log/compact_$(scenario)_$(seed).err
+log    = log/compact_$(Cluster).log
+
+request_cpus   = 1
+request_memory = 2GB
+request_disk   = 1GB
+
+queue stage, scenario, seed, regions, boot_refits from queue_growth_reanalyze.csv
