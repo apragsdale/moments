@@ -427,7 +427,7 @@ class LDModel:
 
         f0 = np.clip(f_start, lower, upper)
         f, ll, lls = base.run_fit_chain(
-            optimize, f0, lower, upper, _fit_rng(self, key), chain
+            _guarded(optimize), f0, lower, upper, _fit_rng(self, key), chain
         )
         return np.append(free_to_d(f[:-1]), f[-1]), ll, lls
 
@@ -518,7 +518,7 @@ class SFSModel:
 
         f0 = np.clip(f_start[: len(bounds)], lower, upper)
         f, ll, lls = base.run_fit_chain(
-            optimize, f0, lower, upper, _fit_rng(self, key), chain
+            _guarded(optimize), f0, lower, upper, _fit_rng(self, key), chain
         )
         return self._with_Ne(free_to_d(f), fs), ll, lls
 
@@ -549,6 +549,27 @@ class SFSModel:
 
 
 MODELS = {"ld": LDModel, "sfs": SFSModel}
+
+# Errors from an optimizer step that tried invalid parameters (for example, non-finite
+# values that don't give a valid demes graph, or a numerical failure)
+FIT_ERRORS = (TypeError, ValueError, ArithmeticError, np.linalg.LinAlgError)
+
+
+def _guarded(optimize):
+    """
+    Wraps an optimizer step (see base.run_fit_chain) so that a step that fails is
+    logged and discarded (log-likelihood -inf), and the fit continues from the best
+    parameters so far, instead of the error stopping the analysis.
+    """
+
+    def step(name, f):
+        try:
+            return optimize(name, f)
+        except FIT_ERRORS as err:
+            print(f"    {name} step failed ({type(err).__name__}: {err})", flush=True)
+            return f, -np.inf
+
+    return step
 
 
 def _fit_rng(model, key):
@@ -801,16 +822,24 @@ def _load_model(method, path):
 
 
 def _refit(args):
+    # a refit that fails entirely (every step failed) is recorded as NaN, so that one
+    # bad bootstrap replicate doesn't stop the analysis
     method, path, b, p_full = args
     model = _load_model(method, path)
-    return model.fit(
-        lambda f: np.asarray(f, dtype=float),
-        _start(p_full),
-        list(range(6)),
-        data=model.bootstrap_data(b),
-        key=1000 + b,
-        chain=base.REFIT_CHAIN,
-    )
+    failed = (np.full(7, np.nan), np.nan, [np.nan] * len(base.REFIT_CHAIN))
+    try:
+        p, ll, lls = model.fit(
+            lambda f: np.asarray(f, dtype=float),
+            _start(p_full),
+            list(range(6)),
+            data=model.bootstrap_data(b),
+            key=1000 + b,
+            chain=base.REFIT_CHAIN,
+        )
+    except FIT_ERRORS as err:
+        print(f"    refit {b} failed ({type(err).__name__}: {err})", flush=True)
+        return failed
+    return (p, ll, lls) if np.isfinite(ll) else failed
 
 
 def analyze_dataset(method, path, procs, boot_refits):
@@ -947,7 +976,9 @@ def print_dataset_summary(res):
         for name, sd in res["sd"].items():
             print(f"  sd {name}: {sd}")
     if "p_boot" in res:
-        print(f"  sd bootstrap: {res['p_boot'].std(axis=0, ddof=1)}")
+        print(f"  sd bootstrap: {np.nanstd(res['p_boot'], axis=0, ddof=1)}")
+        n_failed = int(np.sum(np.isnan(res["p_boot"][:, 0])))
+        print(f"  failed refits: {n_failed} of {len(res['p_boot'])}")
     sys.stdout.flush()
 
 
@@ -1014,7 +1045,9 @@ def summarize():
                     )
                     print(f"    {name:14s}" + " ".join(f"{c:7.2f}" for c in cover))
                 if "p_boot" in R[0]:
-                    lo_hi = [np.percentile(r["p_boot"], [2.5, 97.5], axis=0) for r in R]
+                    lo_hi = [
+                        np.nanpercentile(r["p_boot"], [2.5, 97.5], axis=0) for r in R
+                    ]
                     cover = np.mean(
                         [(lo <= p_true) & (p_true <= hi) for lo, hi in lo_hi], axis=0
                     )

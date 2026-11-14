@@ -448,18 +448,136 @@ other 700. Smallest eigenvalue: LD `mig` −0.004 to 0.003; LD `null`/`weak` and
 - Nelder-Mead after L-BFGS-B in the refits: median gain 0.35 (LD `mig`) to 2.6 (SFS
   `weak`), max 68. L-BFGS-B alone is not enough for the refits.
 
+## Second model (growth + asymmetric migration): results (final, 2026-11-14)
+
+`growth_asym_calibration.py`: deme1 grows exponentially from nu1_0 to nu1_F, and
+migration is asymmetric (M01: deme0 to deme1; M10: deme1 to deme0), built with demes.
+Parameters (nu0, nu1_0, nu1_F, T, M01, M10, Ne). Four LRTs per dataset, each against
+the full model:
+
+| Test | Nested model | Null distribution |
+| --- | --- | --- |
+| asym | M01 = M10 | chi^2_1 (interior; coordinates M, a with M01 = M e^a, M10 = M e^-a) |
+| mig | M01 = M10 = 0 | chi-bar^2 with q = 2 (boundary) |
+| oneway | M10 = 0 | 1/2 chi^2_0 + 1/2 chi^2_1 (boundary) |
+| growth | nu1_F = nu1_0 | chi^2_1 (interior; coordinate g with nu1_F = nu1_0 e^g) |
+
+Datasets: 100 each of `g_nomig` (M01 = M10 = 0), `g_sym` (M01 = M10 = 1), `g_oneway`
+(M01 = 1, M10 = 0) and `g_asym` (M01 = 1, M10 = 0.2), all with deme1 growing from 0.2
+to 2 (other parameters as in the first model), simulated as before; plus the second
+run's 400 datasets (constant sizes, symmetric migration) reanalyzed with this model.
+FIM and GIM at the full fit for every dataset; 100 bootstrap refits per method for
+`g_asym`. Migration rates bounded below at 1e-8. Full fit from the best nested optimum
+and the truth, and a third start if they disagree by > 0.01 (needed in 4% of
+analyses). Summary scripts in the job scratch (`growth_summary.py`,
+`growth_ci_wald.py`); figures from `plot_coverage_growth.py`.
+
+**Runs:** no failed jobs, singular matrices, failed optimizer steps or failed refits.
+Times: reanalysis ~1.2 h (LD) and ~2.3 h (SFS) on 1 CPU; new datasets ~6 h simulating
+(4 CPUs) plus ~1–2.5 h per method; `g_asym` (8 CPUs, 100 refits per method) ~17 h.
+
+### LRT under a true null
+
+Fraction of p < alpha = .01 / .05 / .10 (100–200 datasets per cell; ±~0.02 at .05).
+Ranges over the scenarios where the null is true and over LD and SFS:
+
+| Test (scenarios) | `LRT_adjust` | Inverse blocks, centred J | Monte Carlo |
+| --- | --- | --- | --- |
+| asym (`g_sym`, `mig`, `weak`) | .00 / .00 / .00–.03 | .00–.03 / .04–.07 / .06–.12 | the same |
+| mig, q = 2, weights 1/4, 1/2, 1/4 (`g_nomig`, `null`) | .00 / .00–.01 / .01–.04 | .00–.02 / .03–.07 / .07–.11 | .00–.01 / .01–.05 / .09–.10 |
+| oneway (`g_nomig`, `g_oneway`, `null`) | .00 / .00–.02 / .01–.07 | .00–.02 / .04–.07 / .09–.13 | the same |
+| growth (`mig`, `weak`, `null`) | .00–.01 / .00–.02 / .01–.06 | .00–.02 / .02–.09 / .09–.12 | the same |
+
+
+- **Inverse blocks with centred J are calibrated in all four tests**, interior and
+  boundary, including q = 2. The Monte Carlo null distribution of D (from the
+  estimated H and J) agrees almost exactly, so first-moment matching is adequate.
+  For q = 2, fixed weights 1/4, 1/2, 1/4 are closest to nominal; weights from the GIM
+  correlation of the two estimates are slightly conservative.
+- **`LRT_adjust` is conservative everywhere** (essentially never rejects at .01).
+
+### Power
+
+| Test (scenario), rejection at .05 | `LRT_adjust` | Inverse blocks |
+| --- | --- | --- |
+| asym (`g_asym`, M01 = 1 vs M10 = 0.2): LD / SFS | **0.00 / 0.00** | 1.00 / 1.00 |
+| asym (`g_oneway`): LD / SFS | **0.00 / 0.00** | 0.99 / 1.00 |
+| oneway (`g_asym`, M10 = 0.2 vs 0): LD / SFS | 0.29 / 0.07 | 0.60 / 1.00 |
+| mig (`weak`, M = 0.2): LD / SFS | 0.70 / 1.00 | 0.95 / 1.00 |
+| mig, growth (other scenarios with signal) | ~1.00 | ~1.00 |
+
+Median D in the asym rows: LD 530–820, SFS 4,700–8,000. `LRT_adjust` has no power in
+the interior (chi^2_1) test: its p-value stays near 0.2 however large D is (adj * D
+stays small), a much higher floor than its ~.01–.05 in boundary tests.
+
+### Conditioning, the warning and the fallback
+
+- In the growth test, S / H_psipsi is 0.006–0.015 in every dataset (growth, size and T
+  are confounded), yet inverse blocks are calibrated there. In the first model the
+  failing case (LD `mig`) had −0.016 to 0.011. So a small S / H_psipsi (or scaled
+  eigenvalue of H) does not by itself mean the adjustment fails, and fixed thresholds
+  don't transfer between models.
+- The library warning's original threshold (scaled eigenvalue < 0.005) fired on ~100%
+  of growth tests, including true nulls. Changed for 1.7.1 (on `devel`) to warn only
+  if H is indefinite or has non-positive or non-finite diagonal entries. On this run
+  that fires: never for the growth test; on 59–84% of the degenerate asym tests
+  (below); 1–2% of strong alternatives; 9% of LD `weak` asym tests (M = 0.2, a nearly
+  undefined; the same datasets where the Monte Carlo null can't be computed).
+- The proposed fallback (S / H_psipsi < 0.03 -> submatrix with centred J) triggers on
+  100% of growth tests, making them conservative, and on the degenerate asym test
+  produces 20–31% false rejections.
+- **Degenerate test**: asym on data without migration (`null`, `g_nomig`) is not
+  regular (a is undefined at M = 0): S is hugely negative, inverse blocks give p = 1,
+  `LRT_adjust` rejects 6–11%, the fallback 20–31%. Such tests should be flagged, not
+  adjusted.
+
+### Confidence intervals (`g_asym`, 100 datasets, all 7 parameters)
+
+![95% CI coverage by parameter in the second model, for FIM, GIM, bootstrap-SE and bootstrap-percentile intervals, for LD and the SFS](figures/coverage_growth.png)
+
+![Mean standard error from FIM, GIM and the bootstrap relative to the empirical SD of the estimates, by parameter, in the second model](figures/sd_ratio_growth.png)
+
+- **GIM and the bootstrap agree, and are calibrated**: GIM coverage 0.91–0.98 (LD) and
+  0.92–0.96 (SFS); bootstrap-SE 0.87–0.98; percentile 0.86–0.96 (lowest: LD nu0,
+  percentile, 0.86; LD M10, bootstrap SE, 0.87). GIM SEs are 0.87–1.15 of the
+  empirical SD.
+- **FIM undercovers badly**: 0.52–0.74 (LD), 0.33–0.69 (SFS); FIM SEs are 0.23–0.57 of
+  the empirical SD, worst for the migration rates.
+- GIM coverage in the other scenarios with all parameters interior (`g_sym`, `mig`,
+  `weak`): 0.92–1.00. Bias ≤ 0.26 SD everywhere.
+
+### One-sided Wald test of a migration rate (z = M_hat / SE_GIM at the full fit)
+
+| Rate (scenario) | Truth | Rejection at .01 / .05 / .10 |
+| --- | --- | --- |
+| M01, M10 (`null`, `g_nomig`); M10 (`g_oneway`) | 0 | .00–.03 / .03–.08 / .09–.14 |
+| M10 (`g_asym`): LD / SFS | 0.2 | .28 / .61 / .75 ; 1 / 1 / 1 |
+| M10 (`weak`): LD / SFS | 0.2 | .17 / .42 / .52 ; 1 / 1 / 1 |
+
+This answers the open question about the Wald test suggested in the docs: it is
+roughly calibrated (slightly liberal at .10) with the GIM SE at a full fit on the
+boundary, and has power similar to the inverse-block LRT (LD oneway in `g_asym`: .61
+vs .60 at .05).
+
 ## Next steps
 
-1. Write up the experiment and the method for others (from this file).
-2. Library, later version (decided 2026-11-11): add the inverse-block adjustment as a
-   separate function next to the existing `LRT_adjust` (not a replacement), in both
-   `moments.Godambe` and `moments.LD.Godambe`, as specified in "Practical
-   implementation" above. First test it on other demographic models, which will also
-   set the fallback threshold.
-3. Optional extra run: add a full-model fit with GIM SEs to the null jobs, to check the
-   false positive rate of the one-sided Wald test that the docs now suggest.
-4. Done in this round: the `LRT_adjust` Hessian warning and the docs note on
-   conservative LRTs with alternatives (PR from `lrt_hessian_warning` into `devel`).
+1. Write up both models for others (both are complete).
+2. **Library, future release (decided 2026-11-13):** implement the inverse-block
+   adjustment (centred J), since `LRT_adjust` is too conservative, and in interior tests
+   has essentially no power. Keep the existing `LRT_adjust`; add the new method as a
+   separate function, in `moments.Godambe` and `moments.LD.Godambe`, as specified in
+   "Practical implementation" above. Not for 1.7.1.
+3. **Fallback rule: revisit (decided 2026-11-13).** Fixed thresholds on S / H_psipsi or
+   the scaled eigenvalue don't separate failing cases from confounded-but-fine ones
+   across the two models. Candidates: fall back only when S <= 0 (H indefinite), and
+   flag non-regular tests (a parameter undefined under the null) instead of adjusting.
+   Develop and calibrate this outside moments first, possibly as a separate package
+   that sits on top of moments, so that moments' code, git history and releases don't
+   change back and forth while the method is being validated.
+4. Done: the one-sided Wald test's false-positive rate was checked in the second model
+   (roughly calibrated; see above).
+5. Done: the `LRT_adjust` Hessian warning and docs note (PR from `lrt_hessian_warning`);
+   warning restricted to indefinite H for 1.7.1 (2026-11-13, on `devel`).
 
 ## Related open items
 
